@@ -4,4 +4,4 @@ version = "0.1.0"
 description = "Local, screenshot-driven Diablo III assistant"
 readme = "README.md"
 requires-python = ">=3.12,<3.13"
-dependencies = ["pydantic>=2.12,<3"]
+dependencies = ["pillow>=12,<13", "pydantic>=2.12,<3"]

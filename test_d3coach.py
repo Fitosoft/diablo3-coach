@@ -3,9 +3,20 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from PIL import Image
 from pydantic import ValidationError
 
-from d3coach import Layout, Recognition, claim_next, locate
+from d3coach import (
+    Item,
+    Layout,
+    RawItem,
+    Recognition,
+    claim_next,
+    crop_panel,
+    extract_item,
+    locate,
+    normalize_item,
+)
 
 
 class QueueTest(unittest.TestCase):
@@ -26,6 +37,19 @@ class QueueTest(unittest.TestCase):
                 sorted(path.name for path in incoming.iterdir()),
                 ["002.png", "notes.txt"],
             )
+
+
+class CropTest(unittest.TestCase):
+    def test_crops_normalized_panel_coordinates(self):
+        with tempfile.TemporaryDirectory() as root:
+            source = Path(root) / "source.png"
+            target = Path(root) / "crops" / "panel.png"
+            Image.new("RGB", (200, 100), "black").save(source)
+
+            crop_panel(source, [250, 200, 750, 800], target, padding=0)
+
+            with Image.open(target) as crop:
+                self.assertEqual(crop.size, (100, 60))
 
 
 class RecognitionTest(unittest.TestCase):
@@ -146,6 +170,97 @@ class RecognitionTest(unittest.TestCase):
         self.assertEqual(payload["keep_alive"], 0)
         self.assertEqual(payload["options"]["num_predict"], 512)
         self.assertEqual(layout.panels[0].role, "candidate")
+
+    def test_extracts_one_item_crop_with_fixed_role_and_owner(self):
+        item_content = {
+            "role": "equipped",
+            "owner": "player",
+            "name": "HÖLLENLÄUFER",
+            "quality_text": "Uraltes Set: Stiefel",
+            "slot": "Füße",
+            "armor": 538,
+            "dps": 0.0,
+            "primary_affixes": ["+630 Geschicklichkeit [550 - 650]"],
+            "secondary_affixes": ["+198 Kältewiderstand [176 - 210]"],
+            "set_name": "Unheilige Essenz",
+            "legendary_power": None,
+        }
+
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_):
+                pass
+
+            def read(self):
+                return json.dumps(
+                    {"message": {"content": json.dumps(item_content)}}
+                ).encode()
+
+        requests = []
+
+        def open_request(request, timeout):
+            requests.append(request)
+            return Response()
+
+        with tempfile.TemporaryDirectory() as root:
+            image = Path(root) / "item.png"
+            image.write_bytes(b"image bytes")
+
+            item = extract_item(
+                image,
+                role="equipped",
+                owner="player",
+                opener=open_request,
+            )
+
+        payload = json.loads(requests[0].data)
+        self.assertEqual(payload["format"], RawItem.model_json_schema())
+        self.assertIn("role=equipped", payload["messages"][0]["content"])
+        self.assertEqual(item.name, "HÖLLENLÄUFER")
+        self.assertEqual(item.quality, "ancient_set")
+        self.assertIsNone(item.dps)
+
+    def test_normalizes_visible_german_quality_text(self):
+        raw = RawItem(
+            role="candidate",
+            owner="player",
+            name="Höllenläufer",
+            quality_text="",
+            slot="Füße",
+            armor=549,
+            dps=None,
+            primary_affixes=[],
+            secondary_affixes=[],
+            set_name="Unheilige Essenz",
+            legendary_power=None,
+        )
+
+        item = normalize_item(raw, role="candidate", owner="player")
+
+        self.assertEqual(item.quality, "set")
+
+    def test_recovers_a_misplaced_ancient_set_label(self):
+        raw = RawItem(
+            role="equipped",
+            owner="player",
+            name="Höllenläufer",
+            quality_text="",
+            slot="Füße",
+            armor=538,
+            dps=0.0,
+            primary_affixes=[],
+            secondary_affixes=[],
+            set_name="Uraltes Set: Stiefel",
+            legendary_power="Eure Hasserzeuger erzeugen zusätzlich 2 Hass.",
+        )
+
+        item = normalize_item(raw, role="equipped", owner="player")
+
+        self.assertEqual(item.quality, "ancient_set")
+        self.assertIsNone(item.set_name)
+        self.assertIsNone(item.legendary_power)
 
 
 if __name__ == "__main__":
