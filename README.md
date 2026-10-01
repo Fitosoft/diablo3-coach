@@ -50,7 +50,16 @@ Materialfenster ist noch unzuverlässig; auch einzelne Itemvergleiche werden
 noch übersehen. Eine hohe Modell-`confidence` ist kein Beleg für vollständige
 Erkennung. Strategieregeln, Charakter-State, Screenshot-Aufnahme und
 Handy-Benachrichtigungen gehören noch nicht zum PoC. Würfel-Fertigkeiten,
-Altar, Skillung und Rift-Ergebnisse sind spätere Ansichten.
+Altar, Skillung und Rift-Ergebnisse sind spätere Ansichten. Auch die gefüllte
+oder leere Raute eines legendären Effekts (bereits extrahiert/nicht extrahierbar
+gegenüber noch extrahierbar) wird noch nicht ausgewertet.
+
+Ein kurzer A/B-Versuch mit `qwen2.5vl:7b` auf denselben Screenshots zeigte
+keinen robusteren Gesamtpfad: Auf Item-Ausschnitten las es teils Namen besser,
+übernahm aber auch Vergleichswerte als Affixe. Bei Vollbildern lieferte es
+Pixelkoordinaten oder erfundene Panels statt der verlangten normierten Boxen.
+`qwen3-vl:8b-instruct` bleibt deshalb Standard; ein Modellwechsel ist erst
+nach weiteren reproduzierbaren Bildtests sinnvoll.
 
 ## Voraussetzungen
 

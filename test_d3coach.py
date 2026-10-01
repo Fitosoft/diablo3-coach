@@ -317,6 +317,48 @@ class AnalyzeTest(unittest.TestCase):
 
 
 class RecognitionTest(unittest.TestCase):
+    def test_discards_duplicate_item_box_and_keeps_equipped_role(self):
+        layout = Layout.model_validate({
+            "screen_type": "item_comparison", "confidence": 1,
+            "panels": [
+                {"kind": "item", "role": "candidate", "owner": "player",
+                 "title": "Ring", "box_1000": [600, 0, 900, 700]},
+                {"kind": "item", "role": "equipped", "owner": "player",
+                 "title": "AUSGERÜSTET", "box_1000": [600, 0, 900, 700]},
+            ],
+        })
+
+        self.assertEqual(len(layout.panels), 1)
+        self.assertEqual(layout.panels[0].role, "equipped")
+        self.assertEqual(layout.screen_type, "single_item")
+
+    def test_ring_affix_armor_is_not_base_armor(self):
+        raw = RawItem(
+            role="equipped", owner="player", name="Die Windrose",
+            quality_text="Set: Ring", slot="Finger", armor=380, dps=None,
+            primary_affixes=["+380 Rüstung"], secondary_affixes=[],
+            set_name="Endloser Gang", legendary_power=None,
+        )
+
+        item = normalize_item(raw, role="equipped", owner="player")
+
+        self.assertIsNone(item.armor)
+        self.assertIn("+380 Rüstung", item.primary_affixes)
+
+    def test_legendary_gem_block_is_socket_content_not_item_power(self):
+        gem = "Verderben der Mächtigen - Stufe 19\nErhöht Euren Schaden um 20%."
+        raw = RawItem(
+            role="equipped", owner="player", name="Band des leeren Raunens",
+            quality_text="Uralter legendärer Ring", slot="Finger",
+            armor=None, dps=None, primary_affixes=[], secondary_affixes=[],
+            socket_effects=["Leerer Sockel"], set_name=None, legendary_power=gem,
+        )
+
+        item = normalize_item(raw, role="equipped", owner="player")
+
+        self.assertIsNone(item.legendary_power)
+        self.assertEqual(item.socket_effects, gem.splitlines())
+
     def test_weapon_dps_is_not_armor(self):
         raw = RawItem(
             role="candidate", owner="player", name="BURIZA-DO KYANON",

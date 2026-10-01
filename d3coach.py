@@ -8,7 +8,7 @@ from typing import Literal
 from urllib.request import Request, urlopen
 
 from PIL import Image
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png"}
@@ -52,6 +52,9 @@ socket_effects enthält jede Zeile mit eingesetztem Edelstein-Effekt separat
 Diese Zeilen gehören nicht in primary_affixes oder secondary_affixes.
 Bei einem eigenständigen Edelstein ist quality_text="Edelstein"; seine
 Wirkungen bleiben in primary_affixes, socket_effects ist leer.
+Ein eingesetzter legendärer Edelstein (Name, "Stufe" und Wirkungen) gehört
+vollständig zu socket_effects, auch wenn seine Wirkung orange geschrieben ist.
+legendary_power bezeichnet nur die Macht des Ausrüstungsgegenstands selbst.
 set_name ist nur die grüne Set-Überschrift über der Set-Teileliste;
 bei einem legendären Nicht-Set-Item muss set_name null sein.
 legendary_power ist nur ein orangefarbener itemspezifischer Effekt mit
@@ -186,6 +189,18 @@ class Layout(StrictModel):
     def normalize_confidence(cls, value: int | float) -> float:
         return value / 100 if 1 < value <= 100 else value
 
+    @model_validator(mode="after")
+    def deduplicate_panels(self):
+        unique: dict[tuple[str, tuple[int, ...]], Panel] = {}
+        for panel in self.panels:
+            key = (panel.kind, tuple(panel.box_1000))
+            if key not in unique or panel.role == "equipped":
+                unique[key] = panel
+        self.panels = list(unique.values())
+        if self.screen_type == "item_comparison" and len(self.panels) == 1:
+            self.screen_type = "single_item"
+        return self
+
 
 def locate(
     image: Path,
@@ -306,6 +321,17 @@ def normalize_item(
     secondary_affixes = list(raw.secondary_affixes)
     legendary_power = raw.legendary_power
     socket_effects = list(raw.socket_effects)
+    if legendary_power and " - Stufe " in legendary_power.splitlines()[0]:
+        for line in reversed(legendary_power.splitlines()):
+            if line not in socket_effects:
+                socket_effects.insert(0, line)
+        legendary_power = None
+    if raw.slot in {"Finger", "Hals"} and any(
+        " - Stufe " in effect for effect in socket_effects
+    ):
+        socket_effects = [
+            effect for effect in socket_effects if effect != "Leerer Sockel"
+        ]
     if legendary_power and "\n" not in legendary_power and (
         legendary_power.startswith("+")
         or legendary_power.startswith("Kritischer Trefferschaden")
@@ -340,7 +366,9 @@ def normalize_item(
         quality=quality,
         is_set=is_set,
         slot=None if is_gem else raw.slot,
-        armor=None if is_gem or is_weapon else raw.armor,
+        armor=(
+            None if is_gem or is_weapon or raw.slot in {"Finger", "Hals"} else raw.armor
+        ),
         dps=raw.dps if is_weapon and raw.dps != 0 else None,
         primary_affixes=raw.primary_affixes,
         secondary_affixes=secondary_affixes,
