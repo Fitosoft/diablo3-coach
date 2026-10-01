@@ -22,6 +22,7 @@ from d3coach import (
     extract_materials,
     extract_stats,
     locate,
+    locate_with_fallback,
     normalize_item,
     process_next,
     watch,
@@ -116,6 +117,61 @@ class CropTest(unittest.TestCase):
 
 
 class AnalyzeTest(unittest.TestCase):
+    @patch("d3coach.locate")
+    def test_skips_middle_crop_when_full_image_has_panels(self, locate_mock):
+        expected = Layout(
+            screen_type="single_item", confidence=1,
+            panels=[{
+                "kind": "item", "role": "equipped", "owner": "player",
+                "title": "Ring", "box_1000": [600, 0, 900, 700],
+            }],
+        )
+        locate_mock.return_value = expected
+
+        self.assertIs(locate_with_fallback(Path("unused.png")), expected)
+        locate_mock.assert_called_once()
+
+    @patch("d3coach.locate")
+    def test_retries_empty_layout_on_middle_crop_and_maps_boxes_back(self, locate_mock):
+        locate_mock.side_effect = [
+            Layout(screen_type="other", panels=[], confidence=1),
+            Layout(
+                screen_type="single_item", confidence=1,
+                panels=[{
+                    "kind": "item", "role": "candidate", "owner": "player",
+                    "title": "Buriza", "box_1000": [100, 100, 600, 900],
+                }],
+            ),
+        ]
+        with tempfile.TemporaryDirectory() as root:
+            image = Path(root) / "screen.png"
+            Image.new("RGB", (2560, 1440), "black").save(image)
+
+            result = locate_with_fallback(image)
+
+        self.assertEqual(locate_mock.call_count, 2)
+        self.assertEqual(result.panels[0].box_1000, [222, 100, 554, 900])
+
+    @patch("d3coach.locate")
+    def test_rejects_panel_cut_off_by_middle_crop(self, locate_mock):
+        locate_mock.side_effect = [
+            Layout(screen_type="other", panels=[], confidence=1),
+            Layout(
+                screen_type="single_item", confidence=1,
+                panels=[{
+                    "kind": "item", "role": "candidate", "owner": "player",
+                    "title": "Ring", "box_1000": [850, 10, 1000, 620],
+                }],
+            ),
+        ]
+        with tempfile.TemporaryDirectory() as root:
+            image = Path(root) / "screen.png"
+            Image.new("RGB", (2560, 1440), "black").save(image)
+
+            result = locate_with_fallback(image)
+
+        self.assertEqual(result.panels, [])
+
     @patch("d3coach.unload")
     @patch("d3coach.analyze")
     def test_merges_two_scroll_views_serially_with_later_values_winning(

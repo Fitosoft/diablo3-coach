@@ -22,6 +22,9 @@ GUIDED_PANELS = {
     "follower_stats": ("follower_stats", "follower", "unknown", [270, 0, 480, 835]),
     "follower_item": ("item", "follower", "equipped", [195, 0, 425, 650]),
 }
+# ponytail: one extra GPU pass only after an empty full-screen result; broaden
+# this region only if real screenshots show missed edge tooltips.
+FALLBACK_BOX = [156, 0, 820, 1000]
 LAYOUT_PROMPT = """Analysiere das Layout dieses deutschen Diablo-III-Screenshots.
 Lokalisiere nur schwarz umrandete Tooltip- oder Listenfenster mit lesbarem Text.
 Ein Item-Panel enthält einen Itemnamen, Ausrüstungswerte und Affixe. Die Ansicht
@@ -219,6 +222,33 @@ def locate(
         keep_alive=keep_alive,
     )
     return Layout.model_validate_json(content)
+
+
+def locate_with_fallback(
+    image: Path, *, model: str = MODEL, keep_alive: int | str = 0
+) -> Layout:
+    layout = locate(image, model=model, keep_alive=keep_alive)
+    if layout.panels:
+        return layout
+    with TemporaryDirectory() as root:
+        middle = crop_panel(
+            image, FALLBACK_BOX, Path(root) / "middle.png", padding=0
+        )
+        retry = locate(middle, model=model, keep_alive=keep_alive)
+    panels = []
+    for panel in retry.panels:
+        if panel.box_1000[0] <= 5 or panel.box_1000[2] >= 995:
+            continue
+        box = panel.box_1000.copy()
+        box[0] = FALLBACK_BOX[0] + box[0] * (FALLBACK_BOX[2] - FALLBACK_BOX[0]) // 1000
+        box[2] = FALLBACK_BOX[0] + box[2] * (FALLBACK_BOX[2] - FALLBACK_BOX[0]) // 1000
+        panels.append(panel.model_copy(update={"box_1000": box}))
+    if not panels:
+        return layout
+    retry.panels = panels
+    if retry.screen_type == "item_comparison" and len(panels) == 1:
+        retry.screen_type = "single_item"
+    return retry
 
 
 def extract_item(
@@ -438,7 +468,7 @@ def analyze(
                 raise ValueError("guided screen types require a 2560x1440 screenshot")
     try:
         if screen_type is None:
-            layout = locate(image, model=model, keep_alive="5m")
+            layout = locate_with_fallback(image, model=model, keep_alive="5m")
         else:
             kind, owner, role, box = GUIDED_PANELS[screen_type]
             layout = Layout(

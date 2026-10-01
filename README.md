@@ -16,9 +16,12 @@ Der PoC verwendet bewusst eine kleine, nachvollziehbare Pipeline:
 1. Ein Screenshot gelangt über `screenshots/incoming/` in eine dateibasierte
    Queue.
 2. Qwen3-VL lokal in Ollama bestimmt im automatischen Modus zunächst
-   Bildschirmtyp, Panel-Rollen und normierte Koordinaten (`0..1000`). Für
-   schmale Listenfenster gibt es einen geführten Modus mit festen Ausschnitten
-   für die derzeitige Auflösung von 2560 × 1440.
+   Bildschirmtyp, Panel-Rollen und normierte Koordinaten (`0..1000`). Falls
+   das Vollbild gar kein Panel ergibt, versucht der PoC einmalig einen
+   mittigen Bildausschnitt und rechnet dessen Koordinaten aufs Vollbild zurück.
+   Am Ausschnittrand abgeschnittene Panels werden verworfen. Für schmale
+   Listenfenster gibt es zusätzlich einen geführten Modus mit festen
+   Ausschnitten für die derzeitige Auflösung von 2560 × 1440.
 3. Pillow schneidet jedes erkannte Item-Panel mit wenig Rand aus.
 4. Dasselbe Vision-Modell extrahiert aus jedem Ausschnitt strukturierte
    Item-Daten oder sichtbare Listenzeilen. Vorgegebene Rollen wie `candidate`
@@ -46,9 +49,9 @@ Vollbild -> Layout-JSON -> Item-Crops -> Item-JSON -> Normalisierung -> Ergebnis
 Das ist der aktuelle Harness: feste Schemas, reproduzierbare Testdaten, eine
 serielle Queue und deterministische Nachbearbeitung um ein probabilistisches
 Vision-Modell. Die automatische Lokalisierung schmaler Details- und
-Materialfenster ist noch unzuverlässig; auch einzelne Itemvergleiche werden
-noch übersehen. Eine hohe Modell-`confidence` ist kein Beleg für vollständige
-Erkennung. Strategieregeln, Charakter-State, Screenshot-Aufnahme und
+Materialfenster ist noch unzuverlässig; der mittige Fallback deckt zudem keine
+Tooltips am äußersten Bildrand ab. Eine hohe Modell-`confidence` ist kein Beleg
+für vollständige Erkennung. Strategieregeln, Charakter-State, Screenshot-Aufnahme und
 Handy-Benachrichtigungen gehören noch nicht zum PoC. Würfel-Fertigkeiten,
 Altar, Skillung und Rift-Ergebnisse sind spätere Ansichten. Auch die gefüllte
 oder leere Raute eines legendären Effekts (bereits extrahiert/nicht extrahierbar
@@ -60,6 +63,8 @@ keinen robusteren Gesamtpfad: Auf Item-Ausschnitten las es teils Namen besser,
 Pixelkoordinaten oder erfundene Panels statt der verlangten normierten Boxen.
 `qwen3-vl:8b-instruct` bleibt deshalb Standard; ein Modellwechsel ist erst
 nach weiteren reproduzierbaren Bildtests sinnvoll.
+Beim zunächst übersehenen Buriza/Yang-Vergleich halfen weder Kontrast × 1,3
+noch Autokontrast; der mittige Ausschnitt lokalisierte dagegen beide Tooltips.
 
 ## Voraussetzungen
 
