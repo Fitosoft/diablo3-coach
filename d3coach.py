@@ -38,17 +38,30 @@ Nutze other und leere panels, wenn keines der Fenster sicher sichtbar ist.
 Erfinde weder Panels noch Koordinaten."""
 ITEM_PROMPT = """Extrahiere exakt das einzelne sichtbare deutsche Diablo-III-Item.
 role={role} und owner={owner} sind vorgegeben.
-name ist die große Überschrift ganz oben im goldenen oder grünen Rahmen
-(Beispiel: GOLDHAUT). Die Zeile am Icon (Beispiel: Legendärer Brustschutz)
-ist quality_text, nicht name.
-Übernimm quality_text als exakte farbige Zeile unter dem Itemnamen.
+name ist die große Überschrift ganz oben im Tooltip, unabhängig von ihrer
+Farbe (gold, grün, gelb, blau). Beispiel: PFEILMACHERGRIMM, nicht Seltener Köcher.
+quality_text ist die farbige Typenzeile neben dem Item-Icon, zum Beispiel
+"Seltener Köcher" oder "Uraltes Set: Brustschutz". "Nebenhand" und
+"Dämonenjäger" sind keine quality_text-Werte. slot ist der Ausrüstungsplatz
+rechts oben, nicht die Charakterklasse.
 Übernimm sichtbare Zahlen, Wertebereiche und Affix-Texte exakt.
+armor ist nur der große weiße Wert mit dem Label "Rüstung"; dps ist nur der
+große weiße Wert mit dem Label "Schaden pro Sekunde". Dornenschaden ist kein dps.
+socket_effects enthält jede Zeile mit eingesetztem Edelstein-Effekt separat
+(auch identische Zeilen mehrfach) sowie "Leerer Sockel" für leere Sockel.
+Diese Zeilen gehören nicht in primary_affixes oder secondary_affixes.
+Bei einem eigenständigen Edelstein ist quality_text="Edelstein"; seine
+Wirkungen bleiben in primary_affixes, socket_effects ist leer.
 set_name ist nur die grüne Set-Überschrift über der Set-Teileliste;
 bei einem legendären Nicht-Set-Item muss set_name null sein.
 legendary_power ist nur ein orangefarbener itemspezifischer Effekt mit
 Rautenmarker. Goldener kursiver Flavor-Text ist kein Effekt und gehört weder
 in set_name noch in legendary_power. Grüne Setlisten und Set-Boni gehören
 ebenfalls nicht hinein.
+Ein weißer Edelsteinwert wie "+280 Geschicklichkeit" und kosmetischer Text wie
+"Verschwindendes Färbemittel" sind niemals legendary_power.
+Auch der Edelsteinwert "Kritischer Trefferschaden um 130,0% erhöht" gehört
+zu socket_effects, nicht zu legendary_power.
 Ignoriere Werteveränderungen beim Anlegen, Set-Bonus-Texte, Flavor-Text, Verkaufswert und Haltbarkeit. Erfinde nichts."""
 STATS_PROMPT = """Lies nur die sichtbaren Werte im DETAILS-Fenster für owner={owner}.
 Gib jedes sichtbare Wertepaar als deutschen Anzeigenamen und exakten Wert-Text aus.
@@ -83,6 +96,7 @@ class Item(StrictModel):
     role: Literal["candidate", "equipped", "unknown"]
     owner: Literal["player", "follower", "unknown"]
     name: str
+    kind: Literal["equipment", "gem"] = "equipment"
     quality: Literal[
         "normal",
         "magic",
@@ -98,6 +112,7 @@ class Item(StrictModel):
     dps: float | None
     primary_affixes: list[str]
     secondary_affixes: list[str]
+    socket_effects: list[str] = Field(default_factory=list)
     set_name: str | None
     legendary_power: str | None
 
@@ -107,13 +122,17 @@ class RawItem(StrictModel):
     owner: Literal["player", "follower", "unknown"]
     name: str
     quality_text: str = Field(
-        description="Exact colored line below the item name, e.g. 'Uraltes Set: Stiefel'"
+        description="Exact colored type line beside the item icon, e.g. 'Uraltes Set: Stiefel'"
     )
     slot: str | None
     armor: int | None
     dps: float | None
     primary_affixes: list[str]
     secondary_affixes: list[str]
+    socket_effects: list[str] = Field(
+        default_factory=list,
+        description="Each inserted gem effect or 'Leerer Sockel', preserving duplicates",
+    )
     set_name: str | None = Field(
         description="Green set heading above the set-piece list; never the item name"
     )
@@ -161,6 +180,11 @@ class Layout(StrictModel):
     ]
     panels: list[Panel]
     confidence: float = Field(ge=0, le=1)
+
+    @field_validator("confidence", mode="before")
+    @classmethod
+    def normalize_confidence(cls, value: int | float) -> float:
+        return value / 100 if 1 < value <= 100 else value
 
 
 def locate(
@@ -251,6 +275,9 @@ def normalize_item(
     owner: Literal["player", "follower", "unknown"],
 ) -> Item:
     quality_text = raw.quality_text.casefold()
+    is_gem = quality_text == "edelstein"
+    # ponytail: observed weapon slots only; add labels when a new screenshot needs one.
+    is_weapon = raw.slot is not None and raw.slot.casefold() in {"einhand", "zweihand"}
     name = raw.name
     set_name = raw.set_name or None
     if set_name and name.casefold() == quality_text and "set" not in quality_text:
@@ -278,6 +305,14 @@ def normalize_item(
         quality = "unknown"
     secondary_affixes = list(raw.secondary_affixes)
     legendary_power = raw.legendary_power
+    socket_effects = list(raw.socket_effects)
+    if legendary_power and "\n" not in legendary_power and (
+        legendary_power.startswith("+")
+        or legendary_power.startswith("Kritischer Trefferschaden")
+    ):
+        if legendary_power not in socket_effects:
+            socket_effects.append(legendary_power)
+        legendary_power = None
     if not is_set:
         if legendary_power == set_name or (
             legendary_power
@@ -301,13 +336,15 @@ def normalize_item(
         role=role,
         owner=owner,
         name=name,
+        kind="gem" if is_gem else "equipment",
         quality=quality,
         is_set=is_set,
-        slot=raw.slot,
-        armor=raw.armor,
-        dps=None if raw.armor is not None and raw.dps == 0 else raw.dps,
+        slot=None if is_gem else raw.slot,
+        armor=None if is_gem or is_weapon else raw.armor,
+        dps=raw.dps if is_weapon and raw.dps != 0 else None,
         primary_affixes=raw.primary_affixes,
         secondary_affixes=secondary_affixes,
+        socket_effects=socket_effects,
         set_name=set_name,
         legendary_power=None if is_set else legendary_power,
     )

@@ -317,6 +317,85 @@ class AnalyzeTest(unittest.TestCase):
 
 
 class RecognitionTest(unittest.TestCase):
+    def test_weapon_dps_is_not_armor(self):
+        raw = RawItem(
+            role="candidate", owner="player", name="BURIZA-DO KYANON",
+            quality_text="Archaische legendäre Armbrust", slot="Zweihand",
+            armor=3160, dps=3160.5, primary_affixes=[],
+            secondary_affixes=[], set_name=None, legendary_power=None,
+        )
+
+        item = normalize_item(raw, role="candidate", owner="player")
+
+        self.assertEqual(item.quality, "primal")
+        self.assertEqual(item.dps, 3160.5)
+        self.assertIsNone(item.armor)
+
+    def test_nonweapon_thorns_are_not_dps(self):
+        raw = RawItem(
+            role="candidate", owner="player", name="Magische Beinschienen",
+            quality_text="Magischer Beinschutz", slot="Beine", armor=753,
+            dps=2047, primary_affixes=[],
+            secondary_affixes=["+2047 Dornenschaden"],
+            set_name=None, legendary_power=None,
+        )
+
+        item = normalize_item(raw, role="candidate", owner="player")
+
+        self.assertEqual(item.armor, 753)
+        self.assertIsNone(item.dps)
+
+    def test_gem_is_not_equipment(self):
+        raw = RawItem(
+            role="candidate", owner="player", name="MARQUISE-RUBIN",
+            quality_text="Edelstein", slot="Sockel", armor=0, dps=0,
+            primary_affixes=["Waffe: +160 Schaden"], secondary_affixes=[],
+            set_name=None, legendary_power=None,
+        )
+
+        item = normalize_item(raw, role="candidate", owner="player")
+
+        self.assertEqual(item.kind, "gem")
+        self.assertIsNone(item.slot)
+        self.assertIsNone(item.armor)
+        self.assertIsNone(item.dps)
+
+    def test_keeps_filled_and_empty_sockets_distinct(self):
+        raw = RawItem(
+            role="candidate", owner="player", name="Rüstung",
+            quality_text="Uraltes Set: Brustschutz", slot="Körper",
+            armor=688, dps=None, primary_affixes=[], secondary_affixes=[],
+            socket_effects=["+280 Geschicklichkeit", "+280 Geschicklichkeit", "Leerer Sockel"],
+            set_name="Unheilige Essenz", legendary_power=None,
+        )
+
+        item = normalize_item(raw, role="candidate", owner="player")
+
+        self.assertEqual(item.socket_effects.count("+280 Geschicklichkeit"), 2)
+        self.assertIn("Leerer Sockel", item.socket_effects)
+
+    def test_recovers_gem_effect_misread_as_legendary_power(self):
+        for effect in ("+280 Geschicklichkeit", "Kritischer Trefferschaden um 130,0% erhöht"):
+            with self.subTest(effect=effect):
+                raw = RawItem(
+                    role="equipped", owner="player", name="Waffe",
+                    quality_text="Uralter legendärer Bogen", slot="Zweihand",
+                    armor=None, dps=3258.9, primary_affixes=[],
+                    secondary_affixes=[], set_name=None, legendary_power=effect,
+                )
+
+                item = normalize_item(raw, role="equipped", owner="player")
+
+                self.assertIsNone(item.legendary_power)
+                self.assertEqual(item.socket_effects, [effect])
+
+    def test_accepts_layout_confidence_as_percentage(self):
+        layout = Layout.model_validate(
+            {"screen_type": "other", "panels": [], "confidence": 100}
+        )
+
+        self.assertEqual(layout.confidence, 1.0)
+
     def test_extracts_visible_stats_and_material_counts_without_screenshots(self):
         replies = [
             {"values": {"Kritische Trefferchance": "53,5%"}},

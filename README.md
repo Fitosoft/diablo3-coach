@@ -25,7 +25,9 @@ Der PoC verwendet bewusst eine kleine, nachvollziehbare Pipeline:
    und `equipped` werden nicht erneut erraten.
 5. Pydantic prüft das Modell-JSON strikt. Eine kleine deterministische
    Normalisierung trennt Qualitätsstufe (`legendary`, `ancient`, `primal`) von
-   der unabhängigen Set-Zugehörigkeit (`is_set`).
+   der unabhängigen Set-Zugehörigkeit (`is_set`). Eigenständige Edelsteine
+   haben `kind=gem`; leere Sockel und eingesetzte Edelstein-Effekte stehen
+   getrennt in `socket_effects` (auch mehrfach identische Effekte).
 6. Das Ergebnis wird atomar unter `data/results/` gespeichert; der Screenshot
    wandert nach `done/` oder bei einem Fehler zusammen mit der Fehlermeldung
    nach `failed/`.
@@ -44,8 +46,11 @@ Vollbild -> Layout-JSON -> Item-Crops -> Item-JSON -> Normalisierung -> Ergebnis
 Das ist der aktuelle Harness: feste Schemas, reproduzierbare Testdaten, eine
 serielle Queue und deterministische Nachbearbeitung um ein probabilistisches
 Vision-Modell. Die automatische Lokalisierung schmaler Details- und
-Materialfenster ist noch unzuverlässig. Strategieregeln, Charakter-State,
-Screenshot-Aufnahme und Handy-Benachrichtigungen gehören noch nicht zum PoC.
+Materialfenster ist noch unzuverlässig; auch einzelne Itemvergleiche werden
+noch übersehen. Eine hohe Modell-`confidence` ist kein Beleg für vollständige
+Erkennung. Strategieregeln, Charakter-State, Screenshot-Aufnahme und
+Handy-Benachrichtigungen gehören noch nicht zum PoC. Würfel-Fertigkeiten,
+Altar, Skillung und Rift-Ergebnisse sind spätere Ansichten.
 
 ## Voraussetzungen
 
@@ -114,8 +119,9 @@ uv run python -m unittest -v
 
 Die Tests erzeugen ihre kleinen Bilder selbst und simulieren Ollama. Echte
 Spiel-Screenshots sind für andere Nutzer optional: eigene Bilder mit `analyze`
-prüfen und das JSON mit der Anzeige vergleichen. Es sind keine Diablo-Bilder
-im öffentlichen Repository nötig.
+prüfen und das JSON mit der Anzeige vergleichen. Insbesondere Sockel, Effekte
+und Klassenbeschränkungen sollten vor einer Entscheidung manuell geprüft
+werden. Es sind keine Diablo-Bilder im öffentlichen Repository nötig.
 
 `.idea/`, `*.iml`, `.venv/`, Screenshots und lokale Ergebnisdaten werden nicht
 versioniert.
