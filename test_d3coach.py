@@ -1,7 +1,10 @@
 import json
+import runpy
+import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from PIL import Image
 from pydantic import ValidationError
@@ -11,6 +14,7 @@ from d3coach import (
     Layout,
     RawItem,
     Recognition,
+    analyze,
     claim_next,
     crop_panel,
     extract_item,
@@ -50,6 +54,120 @@ class CropTest(unittest.TestCase):
 
             with Image.open(target) as crop:
                 self.assertEqual(crop.size, (100, 60))
+
+
+class AnalyzeTest(unittest.TestCase):
+    @patch("d3coach.unload")
+    @patch("d3coach.extract_item")
+    @patch("d3coach.locate")
+    def test_analyzes_each_item_panel_and_unloads_the_model(
+        self, locate_mock, extract_mock, unload_mock
+    ):
+        locate_mock.return_value = Layout(
+            screen_type="single_item",
+            panels=[
+                {
+                    "kind": "item",
+                    "role": "candidate",
+                    "owner": "player",
+                    "title": "Höllenläufer",
+                    "box_1000": [100, 100, 900, 900],
+                }
+            ],
+            confidence=0.9,
+        )
+        extract_mock.return_value = Item(
+            role="candidate",
+            owner="player",
+            name="Höllenläufer",
+            quality="set",
+            slot="Füße",
+            armor=549,
+            dps=None,
+            primary_affixes=[],
+            secondary_affixes=[],
+            set_name="Unheilige Essenz",
+            legendary_power=None,
+        )
+
+        with tempfile.TemporaryDirectory() as root:
+            image = Path(root) / "screen.png"
+            Image.new("RGB", (100, 100), "black").save(image)
+
+            result = analyze(image)
+
+        self.assertEqual(result.items[0].name, "Höllenläufer")
+        self.assertEqual(locate_mock.call_args.kwargs["keep_alive"], "5m")
+        self.assertEqual(extract_mock.call_args.kwargs["keep_alive"], "5m")
+        unload_mock.assert_called_once()
+
+    def test_script_entrypoint_reaches_the_crop_pipeline(self):
+        def open_request(request, timeout):
+            payload = json.loads(request.data)
+            if request.full_url.endswith("/generate"):
+                content = {}
+            elif payload["format"]["title"] == "Layout":
+                content = {
+                    "message": {
+                        "content": json.dumps(
+                            {
+                                "screen_type": "single_item",
+                                "panels": [
+                                    {
+                                        "kind": "item",
+                                        "role": "candidate",
+                                        "owner": "player",
+                                        "title": "Test",
+                                        "box_1000": [100, 100, 900, 900],
+                                    }
+                                ],
+                                "confidence": 1.0,
+                            }
+                        )
+                    }
+                }
+            else:
+                content = {
+                    "message": {
+                        "content": json.dumps(
+                            {
+                                "role": "candidate",
+                                "owner": "player",
+                                "name": "Test",
+                                "quality_text": "Set: Stiefel",
+                                "slot": "Füße",
+                                "armor": 1,
+                                "dps": None,
+                                "primary_affixes": [],
+                                "secondary_affixes": [],
+                                "set_name": "Testset",
+                                "legendary_power": None,
+                            }
+                        )
+                    }
+                }
+
+            class Response:
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, *_):
+                    pass
+
+                def read(self):
+                    return json.dumps(content).encode()
+
+            return Response()
+
+        with tempfile.TemporaryDirectory() as root:
+            image = Path(root) / "screen.png"
+            Image.new("RGB", (100, 100), "black").save(image)
+            with (
+                patch("urllib.request.urlopen", new=open_request),
+                patch.object(sys, "argv", ["d3coach.py", str(image)]),
+                patch("builtins.print"),
+            ):
+                runpy.run_path("d3coach.py", run_name="__main__")
 
 
 class RecognitionTest(unittest.TestCase):

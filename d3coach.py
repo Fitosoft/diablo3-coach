@@ -1,6 +1,8 @@
+import argparse
 import base64
 import json
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import Literal
 from urllib.request import Request, urlopen
 
@@ -10,6 +12,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png"}
 OLLAMA_URL = "http://localhost:11434/api/chat"
+OLLAMA_GENERATE_URL = "http://localhost:11434/api/generate"
 MODEL = "qwen3-vl:8b-instruct"
 LAYOUT_PROMPT = """Analysiere das Layout dieses deutschen Diablo-III-Screenshots.
 Lokalisiere ausschließlich relevante Item-, Werte- und Material-Panels; transkribiere deren Inhalt noch nicht.
@@ -120,6 +123,7 @@ def locate(
     *,
     opener=urlopen,
     model: str = MODEL,
+    keep_alive: int | str = 0,
 ) -> Layout:
     content = _ask(
         image,
@@ -128,6 +132,7 @@ def locate(
         num_predict=512,
         opener=opener,
         model=model,
+        keep_alive=keep_alive,
     )
     return Layout.model_validate_json(content)
 
@@ -139,6 +144,7 @@ def extract_item(
     owner: Literal["player", "follower", "unknown"],
     opener=urlopen,
     model: str = MODEL,
+    keep_alive: int | str = 0,
 ) -> Item:
     prompt = f"""Extrahiere exakt das einzelne sichtbare deutsche Diablo-III-Item.
 role={role} und owner={owner} sind vorgegeben.
@@ -154,6 +160,7 @@ Ignoriere Werteveränderungen beim Anlegen, Set-Bonus-Texte, Flavor-Text, Verkau
         num_predict=2048,
         opener=opener,
         model=model,
+        keep_alive=keep_alive,
     )
     return normalize_item(
         RawItem.model_validate_json(content), role=role, owner=owner
@@ -214,11 +221,12 @@ def _ask(
     num_predict: int,
     opener,
     model: str,
+    keep_alive: int | str,
 ) -> str:
     payload = {
         "model": model,
         "stream": False,
-        "keep_alive": 0,
+        "keep_alive": keep_alive,
         "options": {"temperature": 0, "num_predict": num_predict},
         "format": schema,
         "messages": [
@@ -237,6 +245,59 @@ def _ask(
     )
     with opener(request, timeout=120) as response:
         return json.loads(response.read())["message"]["content"]
+
+
+def unload(*, opener=urlopen, model: str = MODEL) -> None:
+    request = Request(
+        OLLAMA_GENERATE_URL,
+        data=json.dumps({"model": model, "keep_alive": 0}).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    with opener(request, timeout=30) as response:
+        response.read()
+
+
+def analyze(image: Path, *, model: str = MODEL) -> Recognition:
+    try:
+        layout = locate(image, model=model, keep_alive="5m")
+        items = []
+        with TemporaryDirectory() as root:
+            for index, panel in enumerate(layout.panels):
+                if panel.kind != "item":
+                    continue
+                crop = crop_panel(
+                    image,
+                    panel.box_1000,
+                    Path(root) / f"panel-{index}.png",
+                )
+                items.append(
+                    extract_item(
+                        crop,
+                        role=panel.role,
+                        owner=panel.owner,
+                        model=model,
+                        keep_alive="5m",
+                    )
+                )
+        return Recognition(
+            screen_type=layout.screen_type,
+            panels=layout.panels,
+            items=items,
+            stats={},
+            materials={},
+            confidence=layout.confidence,
+        )
+    finally:
+        unload(model=model)
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(prog="d3coach")
+    parser.add_argument("image", type=Path, help="Diablo III screenshot")
+    parser.add_argument("--model", default=MODEL)
+    args = parser.parse_args()
+    print(analyze(args.image, model=args.model).model_dump_json(indent=2))
 
 
 def crop_panel(
@@ -263,3 +324,7 @@ def claim_next(incoming: Path, processing: Path) -> Path | None:
         path for path in incoming.iterdir() if path.suffix.lower() in IMAGE_SUFFIXES
     )
     return images[0].replace(processing / images[0].name) if images else None
+
+
+if __name__ == "__main__":
+    main()

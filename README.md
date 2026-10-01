@@ -7,5 +7,5 @@ PoC für serielle Screenshot-Verarbeitung und strukturierte Erkennung mit Ollama
 
 ```powershell
 uv run python -m unittest -v
+uv run python d3coach.py "data/replay/screenshot.png"
 ```
-
