@@ -21,6 +21,13 @@ Ein Item-Panel mit der sichtbaren Überschrift AUSGERÜSTET hat role=equipped.
 Ein daneben angezeigtes Vergleichsitem hat role=candidate. owner ist player oder follower.
 Koordinaten in box_1000 sind ganze Zahlen von 0 bis 1000 relativ zum Vollbild.
 Nutze unknown, wenn etwas nicht sicher sichtbar ist. Erfinde nichts."""
+ITEM_PROMPT = """Extrahiere exakt das einzelne sichtbare deutsche Diablo-III-Item.
+role={role} und owner={owner} sind vorgegeben.
+Übernimm quality_text als exakte farbige Zeile unter dem Itemnamen.
+Übernimm sichtbare Zahlen, Wertebereiche und Affix-Texte exakt.
+set_name ist nur die grüne Set-Überschrift über der Set-Teileliste.
+legendary_power ist nur ein orangefarbener itemspezifischer Effekt; grüne Setlisten und Set-Boni gehören nicht hinein.
+Ignoriere Werteveränderungen beim Anlegen, Set-Bonus-Texte, Flavor-Text, Verkaufswert und Haltbarkeit. Erfinde nichts."""
 
 
 class StrictModel(BaseModel):
@@ -53,12 +60,11 @@ class Item(StrictModel):
         "magic",
         "rare",
         "legendary",
-        "set",
-        "ancient_legendary",
-        "ancient_set",
-        "primal_ancient",
+        "ancient",
+        "primal",
         "unknown",
     ]
+    is_set: bool
     slot: str | None
     armor: int | None
     dps: float | None
@@ -147,16 +153,9 @@ def extract_item(
     model: str = MODEL,
     keep_alive: int | str = 0,
 ) -> Item:
-    prompt = f"""Extrahiere exakt das einzelne sichtbare deutsche Diablo-III-Item.
-role={role} und owner={owner} sind vorgegeben.
-Übernimm quality_text als exakte farbige Zeile unter dem Itemnamen.
-Übernimm sichtbare Zahlen, Wertebereiche und Affix-Texte exakt.
-set_name ist nur die grüne Set-Überschrift über der Set-Teileliste.
-legendary_power ist nur ein orangefarbener itemspezifischer Effekt; grüne Setlisten und Set-Boni gehören nicht hinein.
-Ignoriere Werteveränderungen beim Anlegen, Set-Bonus-Texte, Flavor-Text, Verkaufswert und Haltbarkeit. Erfinde nichts."""
     content = _ask(
         image,
-        prompt=prompt,
+        prompt=ITEM_PROMPT.format(role=role, owner=owner),
         schema=RawItem.model_json_schema(),
         num_predict=2048,
         opener=opener,
@@ -176,19 +175,19 @@ def normalize_item(
 ) -> Item:
     quality_text = raw.quality_text.casefold()
     set_name = raw.set_name
-    known_quality = ("archaisch", "set", "legendär", "selten", "magisch", "normal")
-    if not any(label in quality_text for label in known_quality) and set_name:
+    is_set = "set" in quality_text or set_name is not None
+    if not quality_text and set_name:
         if "set" in set_name.casefold():
             quality_text = set_name.casefold()
             set_name = None
         else:
-            quality_text = "set"
+            quality_text = "legendär"
     if "archaisch" in quality_text:
-        quality = "primal_ancient"
-    elif "set" in quality_text:
-        quality = "ancient_set" if "uralt" in quality_text else "set"
-    elif "legendär" in quality_text:
-        quality = "ancient_legendary" if "uralt" in quality_text else "legendary"
+        quality = "primal"
+    elif "uralt" in quality_text:
+        quality = "ancient"
+    elif "legendär" in quality_text or is_set:
+        quality = "legendary"
     elif "selten" in quality_text:
         quality = "rare"
     elif "magisch" in quality_text:
@@ -202,15 +201,14 @@ def normalize_item(
         owner=owner,
         name=raw.name,
         quality=quality,
+        is_set=is_set,
         slot=raw.slot,
         armor=raw.armor,
         dps=None if raw.armor is not None and raw.dps == 0 else raw.dps,
         primary_affixes=raw.primary_affixes,
         secondary_affixes=raw.secondary_affixes,
         set_name=set_name,
-        legendary_power=(
-            None if quality in {"set", "ancient_set"} else raw.legendary_power
-        ),
+        legendary_power=None if is_set else raw.legendary_power,
     )
 
 

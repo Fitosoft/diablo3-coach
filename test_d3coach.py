@@ -136,7 +136,8 @@ class AnalyzeTest(unittest.TestCase):
             role="candidate",
             owner="player",
             name="Höllenläufer",
-            quality="set",
+            quality="legendary",
+            is_set=True,
             slot="Füße",
             armor=549,
             dps=None,
@@ -245,7 +246,8 @@ class RecognitionTest(unittest.TestCase):
                         "role": "candidate",
                         "owner": "player",
                         "name": "HÖLLENLÄUFER",
-                        "quality": "set",
+                        "quality": "legendary",
+                        "is_set": True,
                         "slot": "Füße",
                         "armor": 549,
                         "dps": None,
@@ -280,7 +282,8 @@ class RecognitionTest(unittest.TestCase):
                     "role": "candidate|equipped",
                     "owner": "player",
                     "name": "HÖLLENLÄUFER",
-                    "quality": "set",
+                    "quality": "legendary",
+                    "is_set": True,
                     "slot": "Füße",
                     "armor": 549,
                     "dps": None,
@@ -393,7 +396,8 @@ class RecognitionTest(unittest.TestCase):
         self.assertEqual(payload["format"], RawItem.model_json_schema())
         self.assertIn("role=equipped", payload["messages"][0]["content"])
         self.assertEqual(item.name, "HÖLLENLÄUFER")
-        self.assertEqual(item.quality, "ancient_set")
+        self.assertEqual(item.quality, "ancient")
+        self.assertTrue(item.is_set)
         self.assertIsNone(item.dps)
 
     def test_normalizes_visible_german_quality_text(self):
@@ -413,7 +417,8 @@ class RecognitionTest(unittest.TestCase):
 
         item = normalize_item(raw, role="candidate", owner="player")
 
-        self.assertEqual(item.quality, "set")
+        self.assertEqual(item.quality, "legendary")
+        self.assertTrue(item.is_set)
 
     def test_recovers_a_misplaced_ancient_set_label(self):
         raw = RawItem(
@@ -432,9 +437,30 @@ class RecognitionTest(unittest.TestCase):
 
         item = normalize_item(raw, role="equipped", owner="player")
 
-        self.assertEqual(item.quality, "ancient_set")
+        self.assertEqual(item.quality, "ancient")
+        self.assertTrue(item.is_set)
         self.assertIsNone(item.set_name)
         self.assertIsNone(item.legendary_power)
+
+    def test_keeps_primal_quality_separate_from_set_type(self):
+        raw = RawItem(
+            role="candidate",
+            owner="player",
+            name="Testitem",
+            quality_text="Archaisches Set: Brustschutz",
+            slot="Körper",
+            armor=1000,
+            dps=None,
+            primary_affixes=[],
+            secondary_affixes=[],
+            set_name="Aegis der Tapferkeit",
+            legendary_power=None,
+        )
+
+        item = normalize_item(raw, role="candidate", owner="player")
+
+        self.assertEqual(item.quality, "primal")
+        self.assertTrue(item.is_set)
 
 
 if __name__ == "__main__":
