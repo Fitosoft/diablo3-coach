@@ -20,6 +20,8 @@ from d3coach import (
     extract_item,
     locate,
     normalize_item,
+    process_next,
+    watch,
 )
 
 
@@ -41,6 +43,60 @@ class QueueTest(unittest.TestCase):
                 sorted(path.name for path in incoming.iterdir()),
                 ["002.png", "notes.txt"],
             )
+
+    @patch("d3coach.analyze")
+    def test_processes_one_screenshot_and_saves_json(self, analyze_mock):
+        analyze_mock.return_value = Recognition(
+            screen_type="other",
+            panels=[],
+            items=[],
+            stats={},
+            materials={},
+            confidence=1.0,
+        )
+        with tempfile.TemporaryDirectory() as root:
+            queue = Path(root) / "screenshots"
+            results = Path(root) / "results"
+            (queue / "incoming").mkdir(parents=True)
+            (queue / "incoming" / "001.png").write_bytes(b"image")
+
+            processed = process_next(queue, results)
+
+            self.assertTrue(processed)
+            self.assertTrue((queue / "done" / "001.png").exists())
+            self.assertEqual(
+                json.loads((results / "001.json").read_text(encoding="utf-8"))[
+                    "screen_type"
+                ],
+                "other",
+            )
+
+    @patch("d3coach.analyze", side_effect=RuntimeError("model failed"))
+    def test_moves_failed_screenshots_aside_and_continues(self, _):
+        with tempfile.TemporaryDirectory() as root:
+            queue = Path(root) / "screenshots"
+            (queue / "incoming").mkdir(parents=True)
+            (queue / "incoming" / "001.png").write_bytes(b"image")
+
+            processed = process_next(queue, Path(root) / "results")
+
+            self.assertTrue(processed)
+            self.assertTrue((queue / "failed" / "001.png").exists())
+            self.assertEqual(
+                (queue / "failed" / "001.error.txt").read_text(encoding="utf-8"),
+                "model failed",
+            )
+
+    @patch("d3coach.sleep")
+    @patch("d3coach.process_next", side_effect=[False, KeyboardInterrupt])
+    def test_watcher_waits_only_when_the_queue_is_empty(
+        self, process_mock, sleep_mock
+    ):
+        with self.assertRaises(KeyboardInterrupt):
+            watch(Path("screenshots"), Path("results"), poll_seconds=0.5)
+
+        self.assertEqual(process_mock.call_count, 2)
+        sleep_mock.assert_called_once_with(0.5)
 
 
 class CropTest(unittest.TestCase):
@@ -164,7 +220,7 @@ class AnalyzeTest(unittest.TestCase):
             Image.new("RGB", (100, 100), "black").save(image)
             with (
                 patch("urllib.request.urlopen", new=open_request),
-                patch.object(sys, "argv", ["d3coach.py", str(image)]),
+                patch.object(sys, "argv", ["d3coach.py", "analyze", str(image)]),
                 patch("builtins.print"),
             ):
                 runpy.run_path("d3coach.py", run_name="__main__")

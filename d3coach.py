@@ -3,6 +3,7 @@ import base64
 import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from time import sleep
 from typing import Literal
 from urllib.request import Request, urlopen
 
@@ -294,10 +295,19 @@ def analyze(image: Path, *, model: str = MODEL) -> Recognition:
 
 def main() -> None:
     parser = argparse.ArgumentParser(prog="d3coach")
-    parser.add_argument("image", type=Path, help="Diablo III screenshot")
-    parser.add_argument("--model", default=MODEL)
+    commands = parser.add_subparsers(dest="command", required=True)
+    analyze_command = commands.add_parser("analyze")
+    analyze_command.add_argument("image", type=Path, help="Diablo III screenshot")
+    analyze_command.add_argument("--model", default=MODEL)
+    watch_command = commands.add_parser("watch")
+    watch_command.add_argument("--queue", type=Path, default=Path("screenshots"))
+    watch_command.add_argument("--results", type=Path, default=Path("data/results"))
+    watch_command.add_argument("--model", default=MODEL)
     args = parser.parse_args()
-    print(analyze(args.image, model=args.model).model_dump_json(indent=2))
+    if args.command == "analyze":
+        print(analyze(args.image, model=args.model).model_dump_json(indent=2))
+    else:
+        watch(args.queue, args.results, model=args.model)
 
 
 def crop_panel(
@@ -319,11 +329,47 @@ def crop_panel(
 
 
 def claim_next(incoming: Path, processing: Path) -> Path | None:
+    incoming.mkdir(parents=True, exist_ok=True)
     processing.mkdir(parents=True, exist_ok=True)
     images = sorted(
         path for path in incoming.iterdir() if path.suffix.lower() in IMAGE_SUFFIXES
     )
     return images[0].replace(processing / images[0].name) if images else None
+
+
+def process_next(queue: Path, results: Path, *, model: str = MODEL) -> bool:
+    processing = queue / "processing"
+    done = queue / "done"
+    failed = queue / "failed"
+    claimed = claim_next(queue / "incoming", processing)
+    if claimed is None:
+        return False
+    done.mkdir(parents=True, exist_ok=True)
+    failed.mkdir(parents=True, exist_ok=True)
+    try:
+        recognition = analyze(claimed, model=model)
+        results.mkdir(parents=True, exist_ok=True)
+        target = results / f"{claimed.stem}.json"
+        temporary = target.with_suffix(".json.tmp")
+        temporary.write_text(recognition.model_dump_json(indent=2), encoding="utf-8")
+        temporary.replace(target)
+        claimed.replace(done / claimed.name)
+    except Exception as error:
+        claimed.replace(failed / claimed.name)
+        (failed / f"{claimed.stem}.error.txt").write_text(str(error), encoding="utf-8")
+    return True
+
+
+def watch(
+    queue: Path,
+    results: Path,
+    *,
+    model: str = MODEL,
+    poll_seconds: float = 1,
+) -> None:
+    while True:
+        if not process_next(queue, results, model=model):
+            sleep(poll_seconds)
 
 
 if __name__ == "__main__":
