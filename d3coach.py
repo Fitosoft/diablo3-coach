@@ -15,19 +15,47 @@ IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png"}
 OLLAMA_URL = "http://localhost:11434/api/chat"
 OLLAMA_GENERATE_URL = "http://localhost:11434/api/generate"
 MODEL = "qwen3-vl:8b-instruct"
+# ponytail: calibrated to 2560x1440; replace when layout detection handles small panels.
+GUIDED_PANELS = {
+    "player_stats": ("player_stats", "player", "unknown", [515, 0, 730, 835]),
+    "materials": ("materials", "unknown", "unknown", [515, 0, 735, 845]),
+    "follower_stats": ("follower_stats", "follower", "unknown", [270, 0, 480, 835]),
+    "follower_item": ("item", "follower", "equipped", [195, 0, 425, 650]),
+}
 LAYOUT_PROMPT = """Analysiere das Layout dieses deutschen Diablo-III-Screenshots.
-Lokalisiere ausschließlich relevante Item-, Werte- und Material-Panels; transkribiere deren Inhalt noch nicht.
-Ein Item-Panel mit der sichtbaren Überschrift AUSGERÜSTET hat role=equipped.
-Ein daneben angezeigtes Vergleichsitem hat role=candidate. owner ist player oder follower.
+Lokalisiere nur schwarz umrandete Tooltip- oder Listenfenster mit lesbarem Text.
+Ein Item-Panel enthält einen Itemnamen, Ausrüstungswerte und Affixe. Die Ansicht
+INVENTAR allein ist KEIN Item-Panel. Erfinde keine Items aus Ausrüstungssymbolen.
+DETAILS mit OFFENSIV/DEFENSIV ist player_stats, außer die Begleiteransicht TEMPLER
+ist geöffnet: Dann ist es follower_stats mit owner=follower.
+MATERIALIEN mit HANDWERK ist materials. Erfasse jeweils das gesamte sichtbare
+Listenfenster, nicht das Inventar daneben.
+Ein Item-Panel mit der Überschrift AUSGERÜSTET hat role=equipped. Ein daneben
+angezeigtes Vergleichsitem hat role=candidate. In der TEMPLER-Ansicht ist
+owner=follower, sonst owner=player.
 Koordinaten in box_1000 sind ganze Zahlen von 0 bis 1000 relativ zum Vollbild.
-Nutze unknown, wenn etwas nicht sicher sichtbar ist. Erfinde nichts."""
+Nutze other und leere panels, wenn keines der Fenster sicher sichtbar ist.
+Erfinde weder Panels noch Koordinaten."""
 ITEM_PROMPT = """Extrahiere exakt das einzelne sichtbare deutsche Diablo-III-Item.
 role={role} und owner={owner} sind vorgegeben.
+name ist die große Überschrift ganz oben im goldenen oder grünen Rahmen
+(Beispiel: GOLDHAUT). Die Zeile am Icon (Beispiel: Legendärer Brustschutz)
+ist quality_text, nicht name.
 Übernimm quality_text als exakte farbige Zeile unter dem Itemnamen.
 Übernimm sichtbare Zahlen, Wertebereiche und Affix-Texte exakt.
-set_name ist nur die grüne Set-Überschrift über der Set-Teileliste.
-legendary_power ist nur ein orangefarbener itemspezifischer Effekt; grüne Setlisten und Set-Boni gehören nicht hinein.
+set_name ist nur die grüne Set-Überschrift über der Set-Teileliste;
+bei einem legendären Nicht-Set-Item muss set_name null sein.
+legendary_power ist nur ein orangefarbener itemspezifischer Effekt mit
+Rautenmarker. Goldener kursiver Flavor-Text ist kein Effekt und gehört weder
+in set_name noch in legendary_power. Grüne Setlisten und Set-Boni gehören
+ebenfalls nicht hinein.
 Ignoriere Werteveränderungen beim Anlegen, Set-Bonus-Texte, Flavor-Text, Verkaufswert und Haltbarkeit. Erfinde nichts."""
+STATS_PROMPT = """Lies nur die sichtbaren Werte im DETAILS-Fenster für owner={owner}.
+Gib jedes sichtbare Wertepaar als deutschen Anzeigenamen und exakten Wert-Text aus.
+Lass Abschnittsüberschriften und abgeschnittene Zeilen weg. Erfinde nichts."""
+MATERIALS_PROMPT = """Lies nur die sichtbaren Materialien im MATERIALIEN-Fenster.
+Gib jeden Materialnamen und seine Anzahl als ganze Zahl ohne Tausenderpunkte aus.
+Lass Abschnittsüberschriften und abgeschnittene Zeilen weg. Erfinde nichts."""
 
 
 class StrictModel(BaseModel):
@@ -94,6 +122,14 @@ class RawItem(StrictModel):
     )
 
 
+class VisibleStats(StrictModel):
+    values: dict[str, str]
+
+
+class VisibleMaterials(StrictModel):
+    values: dict[str, int]
+
+
 class Recognition(StrictModel):
     screen_type: Literal[
         "single_item",
@@ -107,8 +143,10 @@ class Recognition(StrictModel):
     panels: list[Panel]
     items: list[Item]
     stats: dict[str, str]
+    follower_stats: dict[str, str] = Field(default_factory=dict)
     materials: dict[str, int]
     confidence: float = Field(ge=0, le=1)
+    source_images: list[str] = Field(default_factory=list)
 
 
 class Layout(StrictModel):
@@ -167,6 +205,45 @@ def extract_item(
     )
 
 
+def extract_stats(
+    image: Path,
+    *,
+    owner: Literal["player", "follower"],
+    opener=urlopen,
+    model: str = MODEL,
+    keep_alive: int | str = 0,
+) -> dict[str, str]:
+    content = _ask(
+        image,
+        prompt=STATS_PROMPT.format(owner=owner),
+        schema=VisibleStats.model_json_schema(),
+        num_predict=2048,
+        opener=opener,
+        model=model,
+        keep_alive=keep_alive,
+    )
+    return VisibleStats.model_validate_json(content).values
+
+
+def extract_materials(
+    image: Path,
+    *,
+    opener=urlopen,
+    model: str = MODEL,
+    keep_alive: int | str = 0,
+) -> dict[str, int]:
+    content = _ask(
+        image,
+        prompt=MATERIALS_PROMPT,
+        schema=VisibleMaterials.model_json_schema(),
+        num_predict=2048,
+        opener=opener,
+        model=model,
+        keep_alive=keep_alive,
+    )
+    return VisibleMaterials.model_validate_json(content).values
+
+
 def normalize_item(
     raw: RawItem,
     *,
@@ -174,8 +251,11 @@ def normalize_item(
     owner: Literal["player", "follower", "unknown"],
 ) -> Item:
     quality_text = raw.quality_text.casefold()
-    set_name = raw.set_name
-    is_set = "set" in quality_text or set_name is not None
+    name = raw.name
+    set_name = raw.set_name or None
+    if set_name and name.casefold() == quality_text and "set" not in quality_text:
+        name, set_name = set_name, None
+    is_set = "set" in quality_text or (not quality_text and set_name is not None)
     if not quality_text and set_name:
         if "set" in set_name.casefold():
             quality_text = set_name.casefold()
@@ -196,19 +276,40 @@ def normalize_item(
         quality = "normal"
     else:
         quality = "unknown"
+    secondary_affixes = list(raw.secondary_affixes)
+    legendary_power = raw.legendary_power
+    if not is_set:
+        if legendary_power == set_name or (
+            legendary_power
+            and "\n" in legendary_power
+            and all(
+                line.strip().startswith("+") for line in legendary_power.splitlines()
+            )
+        ):
+            legendary_power = None
+        set_name = None
+        if legendary_power is None:
+            # ponytail: recover this follower effect; extend only for observed misreads.
+            radiating = [
+                affix for affix in secondary_affixes if "(Strahlt aus)" in affix
+            ]
+            if len(radiating) == 1:
+                legendary_power = radiating[0]
+        if legendary_power in secondary_affixes:
+            secondary_affixes.remove(legendary_power)
     return Item(
         role=role,
         owner=owner,
-        name=raw.name,
+        name=name,
         quality=quality,
         is_set=is_set,
         slot=raw.slot,
         armor=raw.armor,
         dps=None if raw.armor is not None and raw.dps == 0 else raw.dps,
         primary_affixes=raw.primary_affixes,
-        secondary_affixes=raw.secondary_affixes,
+        secondary_affixes=secondary_affixes,
         set_name=set_name,
-        legendary_power=None if is_set else raw.legendary_power,
+        legendary_power=None if is_set else legendary_power,
     )
 
 
@@ -257,36 +358,108 @@ def unload(*, opener=urlopen, model: str = MODEL) -> None:
         response.read()
 
 
-def analyze(image: Path, *, model: str = MODEL) -> Recognition:
+def analyze(
+    image: Path,
+    *,
+    model: str = MODEL,
+    screen_type: Literal[
+        "player_stats", "materials", "follower_stats", "follower_item"
+    ] | None = None,
+    unload_model: bool = True,
+) -> Recognition:
+    if screen_type is not None:
+        with Image.open(image) as source:
+            if source.size != (2560, 1440):
+                raise ValueError("guided screen types require a 2560x1440 screenshot")
     try:
-        layout = locate(image, model=model, keep_alive="5m")
+        if screen_type is None:
+            layout = locate(image, model=model, keep_alive="5m")
+        else:
+            kind, owner, role, box = GUIDED_PANELS[screen_type]
+            layout = Layout(
+                screen_type=screen_type,
+                panels=[
+                    Panel(
+                        kind=kind,
+                        role=role,
+                        owner=owner,
+                        title=screen_type,
+                        box_1000=box,
+                    )
+                ],
+                confidence=1.0,
+            )
         items = []
+        stats = {}
+        follower_stats = {}
+        materials = {}
         with TemporaryDirectory() as root:
             for index, panel in enumerate(layout.panels):
-                if panel.kind != "item":
+                if panel.kind == "unknown":
                     continue
                 crop = crop_panel(
                     image,
                     panel.box_1000,
                     Path(root) / f"panel-{index}.png",
                 )
-                items.append(
-                    extract_item(
-                        crop,
-                        role=panel.role,
-                        owner=panel.owner,
-                        model=model,
-                        keep_alive="5m",
+                if panel.kind == "item":
+                    items.append(
+                        extract_item(
+                            crop,
+                            role=panel.role,
+                            owner=panel.owner,
+                            model=model,
+                            keep_alive="5m",
+                        )
                     )
-                )
+                elif panel.kind == "materials":
+                    materials.update(
+                        extract_materials(crop, model=model, keep_alive="5m")
+                    )
+                elif panel.kind in {"player_stats", "follower_stats"}:
+                    owner = "follower" if panel.kind == "follower_stats" else "player"
+                    target = follower_stats if owner == "follower" else stats
+                    target.update(
+                        extract_stats(crop, owner=owner, model=model, keep_alive="5m")
+                    )
         return Recognition(
             screen_type=layout.screen_type,
             panels=layout.panels,
             items=items,
-            stats={},
-            materials={},
+            stats=stats,
+            follower_stats=follower_stats,
+            materials=materials,
             confidence=layout.confidence,
+            source_images=[image.name],
         )
+    finally:
+        if unload_model:
+            unload(model=model)
+
+
+def analyze_many(
+    images: list[Path],
+    *,
+    screen_type: Literal["player_stats", "materials", "follower_stats"],
+    model: str = MODEL,
+) -> Recognition:
+    if not images or screen_type not in {"player_stats", "materials", "follower_stats"}:
+        raise ValueError("multiple images require a stats or materials screen type")
+    try:
+        result = analyze(
+            images[0], model=model, screen_type=screen_type, unload_model=False
+        )
+        for image in images[1:]:
+            next_result = analyze(
+                image, model=model, screen_type=screen_type, unload_model=False
+            )
+            result.stats.update(next_result.stats)
+            result.follower_stats.update(next_result.follower_stats)
+            result.materials.update(next_result.materials)
+            result.panels.extend(next_result.panels)
+            result.source_images.extend(next_result.source_images)
+            result.confidence = min(result.confidence, next_result.confidence)
+        return result
     finally:
         unload(model=model)
 
@@ -295,15 +468,31 @@ def main() -> None:
     parser = argparse.ArgumentParser(prog="d3coach")
     commands = parser.add_subparsers(dest="command", required=True)
     analyze_command = commands.add_parser("analyze")
-    analyze_command.add_argument("image", type=Path, help="Diablo III screenshot")
+    analyze_command.add_argument(
+        "images", nargs="+", type=Path, help="Diablo III screenshot(s)"
+    )
     analyze_command.add_argument("--model", default=MODEL)
+    analyze_command.add_argument("--screen-type", choices=GUIDED_PANELS)
     watch_command = commands.add_parser("watch")
     watch_command.add_argument("--queue", type=Path, default=Path("screenshots"))
     watch_command.add_argument("--results", type=Path, default=Path("data/results"))
     watch_command.add_argument("--model", default=MODEL)
     args = parser.parse_args()
     if args.command == "analyze":
-        print(analyze(args.image, model=args.model).model_dump_json(indent=2))
+        if len(args.images) == 1:
+            result = analyze(
+                args.images[0], model=args.model, screen_type=args.screen_type
+            )
+        else:
+            if args.screen_type not in {"player_stats", "materials", "follower_stats"}:
+                parser.error(
+                    "multiple screenshots require --screen-type player_stats, "
+                    "materials or follower_stats"
+                )
+            result = analyze_many(
+                args.images, model=args.model, screen_type=args.screen_type
+            )
+        print(result.model_dump_json(indent=2))
     else:
         watch(args.queue, args.results, model=args.model)
 

@@ -15,9 +15,12 @@ from d3coach import (
     RawItem,
     Recognition,
     analyze,
+    analyze_many,
     claim_next,
     crop_panel,
     extract_item,
+    extract_materials,
+    extract_stats,
     locate,
     normalize_item,
     process_next,
@@ -113,6 +116,92 @@ class CropTest(unittest.TestCase):
 
 
 class AnalyzeTest(unittest.TestCase):
+    @patch("d3coach.unload")
+    @patch("d3coach.analyze")
+    def test_merges_two_scroll_views_serially_with_later_values_winning(
+        self, analyze_mock, unload_mock
+    ):
+        analyze_mock.side_effect = [
+            Recognition(
+                screen_type="materials", panels=[], items=[], stats={},
+                materials={"Arkanstaub": 10, "Atem des Todes": 4},
+                confidence=1, source_images=["first.png"],
+            ),
+            Recognition(
+                screen_type="materials", panels=[], items=[], stats={},
+                materials={"Atem des Todes": 5, "Vergessene Seele": 2},
+                confidence=1, source_images=["second.png"],
+            ),
+        ]
+
+        result = analyze_many(
+            [Path("first.png"), Path("second.png")], screen_type="materials"
+        )
+
+        self.assertEqual(
+            result.materials,
+            {"Arkanstaub": 10, "Atem des Todes": 5, "Vergessene Seele": 2},
+        )
+        self.assertEqual(result.source_images, ["first.png", "second.png"])
+        self.assertEqual(
+            [call.args[0].name for call in analyze_mock.call_args_list],
+            ["first.png", "second.png"],
+        )
+        unload_mock.assert_called_once()
+        self.assertTrue(
+            all(not call.kwargs["unload_model"] for call in analyze_mock.call_args_list)
+        )
+
+    @patch("d3coach.unload")
+    @patch("d3coach.extract_materials", return_value={"Arkanstaub": 29658})
+    @patch("d3coach.locate", side_effect=AssertionError("guided mode must not locate"))
+    def test_guided_material_view_uses_known_panel_region(self, _, materials_mock, __):
+        with tempfile.TemporaryDirectory() as root:
+            image = Path(root) / "screen.png"
+            Image.new("RGB", (2560, 1440), "black").save(image)
+            result = analyze(image, screen_type="materials")
+
+        self.assertEqual(result.screen_type, "materials")
+        self.assertEqual(result.materials, {"Arkanstaub": 29658})
+        self.assertEqual(result.panels[0].kind, "materials")
+        materials_mock.assert_called_once()
+
+    @patch("d3coach.unload")
+    @patch("d3coach.extract_stats", return_value={"Kritische Trefferchance": "53,5%"})
+    @patch("d3coach.extract_materials", return_value={"Arkanstaub": 29658})
+    @patch("d3coach.locate")
+    def test_routes_visible_lists_by_kind_and_owner(
+        self, locate_mock, materials_mock, stats_mock, _
+    ):
+        locate_mock.return_value = Layout(
+            screen_type="follower_stats",
+            panels=[
+                {
+                    "kind": "player_stats", "role": "unknown", "owner": "player",
+                    "title": "DETAILS", "box_1000": [100, 100, 300, 800],
+                },
+                {
+                    "kind": "follower_stats", "role": "unknown", "owner": "follower",
+                    "title": "DETAILS", "box_1000": [300, 100, 500, 800],
+                },
+                {
+                    "kind": "materials", "role": "unknown", "owner": "player",
+                    "title": "MATERIALIEN", "box_1000": [500, 100, 700, 800],
+                },
+            ],
+            confidence=0.8,
+        )
+        with tempfile.TemporaryDirectory() as root:
+            image = Path(root) / "screen.png"
+            Image.new("RGB", (100, 100), "black").save(image)
+            result = analyze(image)
+
+        self.assertEqual(result.stats, {"Kritische Trefferchance": "53,5%"})
+        self.assertEqual(result.follower_stats, {"Kritische Trefferchance": "53,5%"})
+        self.assertEqual(result.materials, {"Arkanstaub": 29658})
+        self.assertEqual(stats_mock.call_count, 2)
+        self.assertEqual(materials_mock.call_count, 1)
+
     @patch("d3coach.unload")
     @patch("d3coach.extract_item")
     @patch("d3coach.locate")
@@ -228,6 +317,41 @@ class AnalyzeTest(unittest.TestCase):
 
 
 class RecognitionTest(unittest.TestCase):
+    def test_extracts_visible_stats_and_material_counts_without_screenshots(self):
+        replies = [
+            {"values": {"Kritische Trefferchance": "53,5%"}},
+            {"values": {"Arkanstaub": 29658}},
+        ]
+        requests = []
+
+        def open_request(request, timeout):
+            requests.append(json.loads(request.data))
+
+            class Response:
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, *_):
+                    pass
+
+                def read(self):
+                    return json.dumps(
+                        {"message": {"content": json.dumps(replies.pop(0))}}
+                    ).encode()
+
+            return Response()
+
+        with tempfile.TemporaryDirectory() as root:
+            image = Path(root) / "crop.png"
+            Image.new("RGB", (10, 10), "black").save(image)
+            stats = extract_stats(image, owner="follower", opener=open_request)
+            materials = extract_materials(image, opener=open_request)
+
+        self.assertEqual(stats, {"Kritische Trefferchance": "53,5%"})
+        self.assertEqual(materials, {"Arkanstaub": 29658})
+        self.assertIn("follower", requests[0]["messages"][0]["content"])
+        self.assertIn("MATERIALIEN", requests[1]["messages"][0]["content"])
+
     def test_accepts_a_valid_item_comparison(self):
         recognition = Recognition.model_validate(
             {
@@ -461,6 +585,93 @@ class RecognitionTest(unittest.TestCase):
 
         self.assertEqual(item.quality, "primal")
         self.assertTrue(item.is_set)
+
+    def test_recovers_follower_item_name_from_misplaced_set_name(self):
+        raw = RawItem(
+            role="equipped",
+            owner="follower",
+            name="Legendärer Brustschutz",
+            quality_text="Legendärer Brustschutz",
+            slot="Körper",
+            armor=748,
+            dps=None,
+            primary_affixes=[],
+            secondary_affixes=[],
+            set_name="GOLDHAUT",
+            legendary_power="Gegner lassen manchmal Gold fallen.",
+        )
+
+        item = normalize_item(raw, role="equipped", owner="follower")
+
+        self.assertEqual(item.name, "GOLDHAUT")
+        self.assertEqual(item.quality, "legendary")
+        self.assertFalse(item.is_set)
+        self.assertIsNone(item.set_name)
+        self.assertEqual(item.legendary_power, raw.legendary_power)
+
+    def test_empty_set_name_does_not_make_a_legendary_item_a_set(self):
+        raw = RawItem(
+            role="equipped",
+            owner="follower",
+            name="Goldhaut",
+            quality_text="Legendärer Brustschutz",
+            slot="Körper",
+            armor=748,
+            dps=None,
+            primary_affixes=[],
+            secondary_affixes=[],
+            set_name="",
+            legendary_power=None,
+        )
+
+        item = normalize_item(raw, role="equipped", owner="follower")
+
+        self.assertFalse(item.is_set)
+        self.assertIsNone(item.set_name)
+
+    def test_ignores_flavor_text_misread_as_set_name_and_power(self):
+        flavor = "Die Dunkelheit wird von goldenem Glanz durchflutet."
+        raw = RawItem(
+            role="equipped",
+            owner="follower",
+            name="GOLDHAUT",
+            quality_text="Legendärer Brustschutz",
+            slot="Körper",
+            armor=748,
+            dps=None,
+            primary_affixes=[],
+            secondary_affixes=["Gegner lassen manchmal Gold fallen. (Strahlt aus)"],
+            set_name=flavor,
+            legendary_power=flavor,
+        )
+
+        item = normalize_item(raw, role="equipped", owner="follower")
+
+        self.assertFalse(item.is_set)
+        self.assertIsNone(item.set_name)
+        self.assertIn("Strahlt aus", item.legendary_power)
+        self.assertEqual(item.secondary_affixes, [])
+
+    def test_recovers_follower_power_from_secondary_affix_not_socketed_gems(self):
+        effect = "Gegner lassen manchmal Gold fallen. (Strahlt aus)"
+        raw = RawItem(
+            role="equipped",
+            owner="follower",
+            name="GOLDHAUT",
+            quality_text="Legendärer Brustschutz",
+            slot="Körper",
+            armor=748,
+            dps=None,
+            primary_affixes=[],
+            secondary_affixes=["+100% mehr Gold von Gegnern", effect],
+            set_name=None,
+            legendary_power="+220 Stärke\n+220 Stärke\n+220 Stärke",
+        )
+
+        item = normalize_item(raw, role="equipped", owner="follower")
+
+        self.assertEqual(item.legendary_power, effect)
+        self.assertEqual(item.secondary_affixes, ["+100% mehr Gold von Gegnern"])
 
 
 if __name__ == "__main__":
