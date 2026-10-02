@@ -163,6 +163,8 @@ class AnalyzeTest(unittest.TestCase):
                     "title": "Ring", "box_1000": [850, 10, 1000, 620],
                 }],
             ),
+            Layout(screen_type="other", panels=[], confidence=1),
+            Layout(screen_type="other", panels=[], confidence=1),
         ]
         with tempfile.TemporaryDirectory() as root:
             image = Path(root) / "screen.png"
@@ -171,6 +173,24 @@ class AnalyzeTest(unittest.TestCase):
             result = locate_with_fallback(image)
 
         self.assertEqual(result.panels, [])
+
+    @patch("d3coach.locate")
+    def test_half_fallback_keeps_only_complete_candidate_and_remaps(self, locate_mock):
+        empty = Layout(screen_type="other", panels=[], confidence=1)
+        locate_mock.side_effect = [empty, empty, empty, Layout(
+            screen_type="item_comparison", confidence=1, panels=[
+                {"kind": "item", "role": "candidate", "owner": "player",
+                 "title": "Sunwuko", "box_1000": [80, 0, 600, 900]},
+                {"kind": "item", "role": "equipped", "owner": "player",
+                 "title": "Vergleich", "box_1000": [0, 0, 50, 900]},
+            ])]
+        with tempfile.TemporaryDirectory() as root:
+            image = Path(root) / "screen.png"
+            Image.new("RGB", (2560, 1440), "black").save(image)
+            result = locate_with_fallback(image)
+        self.assertEqual(result.screen_type, "single_item")
+        self.assertEqual(result.panels[0].box_1000, [525, 0, 793, 900])
+        self.assertEqual(len(result.panels), 1)
 
     @patch("d3coach.unload")
     @patch("d3coach.analyze")

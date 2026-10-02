@@ -19,6 +19,11 @@ Der PoC verwendet bewusst eine kleine, nachvollziehbare Pipeline:
    Bildschirmtyp, Panel-Rollen und normierte Koordinaten (`0..1000`). Falls
    das Vollbild gar kein Panel ergibt, versucht der PoC einmalig einen
    mittigen Bildausschnitt und rechnet dessen Koordinaten aufs Vollbild zurück.
+   Bleibt auch dieser ohne vollständige Panels, folgen seriell überlappende
+   linke/rechte Hälften (bis 51,6 % bzw. ab 48,4 % der Breite). Dort werden nur
+   vollständige Item-Kandidaten übernommen, keine ausgerüsteten Vergleichsitems.
+   Der erste erfolgreiche Ausschnitt beendet den Fallback. Zentrierte Ansichten
+   werden weiterhin zuerst im Vollbild verarbeitet.
    Am Ausschnittrand abgeschnittene Panels werden verworfen. Für schmale
    Listenfenster gibt es zusätzlich einen geführten Modus mit festen
    Ausschnitten für die derzeitige Auflösung von 2560 × 1440.
