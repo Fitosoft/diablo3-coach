@@ -386,7 +386,8 @@ class AnalyzeTest(unittest.TestCase):
             Image.new("RGB", (100, 100), "black").save(image)
             with (
                 patch("urllib.request.urlopen", new=open_request),
-                patch.object(sys, "argv", ["d3coach.py", "analyze", str(image)]),
+                patch.object(sys, "argv", ["d3coach.py", "analyze", str(image),
+                                          "--state", str(Path(root) / "state.json")]),
                 patch("builtins.print"),
             ):
                 runpy.run_path("d3coach.py", run_name="__main__")

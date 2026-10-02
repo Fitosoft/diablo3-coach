@@ -1,10 +1,12 @@
 import argparse
 import base64
 import json
+from contextlib import contextmanager
+from hashlib import sha256
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from time import sleep
-from typing import Literal
+from time import monotonic, sleep
+from typing import Annotated, Literal
 from urllib.request import Request, urlopen
 
 from PIL import Image
@@ -15,6 +17,7 @@ IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png"}
 OLLAMA_URL = "http://localhost:11434/api/chat"
 OLLAMA_GENERATE_URL = "http://localhost:11434/api/generate"
 MODEL = "qwen3-vl:8b-instruct"
+NonNegativeInt = Annotated[int, Field(ge=0)]
 # ponytail: calibrated to 2560x1440; replace when layout detection handles small panels.
 GUIDED_PANELS = {
     "player_stats": ("player_stats", "player", "unknown", [515, 0, 730, 835]),
@@ -152,7 +155,7 @@ class VisibleStats(StrictModel):
 
 
 class VisibleMaterials(StrictModel):
-    values: dict[str, int]
+    values: dict[str, NonNegativeInt]
 
 
 class Recognition(StrictModel):
@@ -169,7 +172,7 @@ class Recognition(StrictModel):
     items: list[Item]
     stats: dict[str, str]
     follower_stats: dict[str, str] = Field(default_factory=dict)
-    materials: dict[str, int]
+    materials: dict[str, NonNegativeInt]
     confidence: float = Field(ge=0, le=1)
     source_images: list[str] = Field(default_factory=list)
 
@@ -203,6 +206,165 @@ class Layout(StrictModel):
         if self.screen_type == "item_comparison" and len(self.panels) == 1:
             self.screen_type = "single_item"
         return self
+
+
+class StoredItem(StrictModel):
+    item: Item
+    location: Literal["equipped", "inventory", "stash", "unknown"] = "unknown"
+    evidence: Literal["observed", "assumed"] = "observed"
+    souvenir: bool = False
+    cube_status: Literal["unknown", "needed", "not_needed"] = "unknown"
+    source_images: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def protect_primal(self):
+        self.souvenir = self.souvenir or self.item.quality == "primal"
+        return self
+
+
+class EquipmentAdvice(StrictModel):
+    item_id: str
+    action: Literal["equip"] = "equip"
+    replaced_item_id: str | None
+    replaced_action: Literal["keep", "cube", "salvage"] | None
+    reason: str
+
+
+class CoachState(StrictModel):
+    schema_version: Literal[1] = 1
+    character_class: str = "Kreuzritter"
+    build: str = "Aegis der Tapferkeit"
+    season: str | None = None
+    goals: list[str] = Field(default_factory=lambda: ["Saisonreise abschließen", "Altar aufrüsten"])
+    season_journey: dict[str, Literal["unknown", "todo", "done"]] = Field(default_factory=dict)
+    altar: dict[str, Literal["unknown", "todo", "done"]] = Field(default_factory=dict)
+    stats: dict[str, str] = Field(default_factory=dict)
+    follower_stats: dict[str, str] = Field(default_factory=dict)
+    materials: dict[str, NonNegativeInt] = Field(default_factory=dict)
+    resources: dict[str, NonNegativeInt] = Field(default_factory=dict)
+    items: dict[str, StoredItem] = Field(default_factory=dict)
+    observations: list[str] = Field(default_factory=list)
+    recommendations: list[EquipmentAdvice] = Field(default_factory=list)
+
+
+def load_state(path: Path) -> CoachState:
+    return CoachState.model_validate_json(path.read_text(encoding="utf-8")) if path.exists() else CoachState()
+
+
+def save_state(path: Path, state: CoachState) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary.write_text(state.model_dump_json(indent=2), encoding="utf-8")
+    temporary.replace(path)
+
+
+@contextmanager
+def state_lock(path: Path, *, timeout: float = 5):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lock = path.with_suffix(path.suffix + ".lock")
+    deadline = monotonic() + timeout
+    while True:
+        try:
+            handle = lock.open("x")
+            break
+        except FileExistsError:
+            if monotonic() >= deadline:
+                raise TimeoutError(f"State is locked: {lock}; after a crash remove this lock only when no writer is running")
+            sleep(0.1)
+    try:
+        yield
+    finally:
+        handle.close()
+        lock.unlink()
+
+
+def disposal_advice(stored: StoredItem) -> tuple[str, str]:
+    if stored.souvenir or stored.item.quality == "primal":
+        return "keep", "Andenken/archaisches Item: aufheben."
+    if stored.cube_status == "needed":
+        return "cube", "Für die noch benötigte Würfelmacht aufheben und extrahieren."
+    if stored.cube_status == "unknown":
+        return "keep", "Würfelstatus unbekannt: vor dem Zerlegen prüfen."
+    return "salvage", "Würfelprüfung abgeschlossen; kein Andenken."
+
+
+def recommend_equip(state: CoachState, item_id: str, *, replace_id: str | None = None) -> EquipmentAdvice:
+    stored = state.items[item_id]
+    item = stored.item
+    if item.kind != "equipment" or item.owner == "unknown" or not item.slot:
+        raise ValueError("equipping requires equipment with a known owner and slot")
+    # ponytail: rings and weapon combinations need explicit replacement, not a guessed slot.
+    ambiguous = item.slot in {"Finger", "Einhand", "Zweihand", "Nebenhand"}
+    if ambiguous and replace_id is None:
+        raise ValueError("rings/weapons require --replace-id; an empty slot is not assumed")
+    existing = [key for key, value in state.items.items() if key != item_id
+                and value.location == "equipped" and value.item.owner == item.owner
+                and value.item.slot == item.slot]
+    if replace_id is None:
+        if len(existing) > 1:
+            raise ValueError("multiple equipped items require --replace-id")
+        replace_id = existing[0] if existing else None
+    elif replace_id == item_id or replace_id not in existing:
+        raise ValueError("replacement must be an equipped item with the same owner and slot")
+    action, reason = disposal_advice(state.items[replace_id]) if replace_id else (None, "Kein erfasstes Ersatzitem.")
+    advice = EquipmentAdvice(item_id=item_id, replaced_item_id=replace_id,
+                             replaced_action=action, reason=reason)
+    if replace_id:
+        state.items[replace_id].location = "inventory"
+        state.items[replace_id].evidence = "assumed"
+    stored.location = "equipped"
+    stored.evidence = "assumed"
+    stored.item = item.model_copy(update={"role": "equipped"})
+    state.recommendations.append(advice)
+    return advice
+
+
+def update_state(state: CoachState, result: Recognition, *, location: str = "unknown",
+                 item_id: str | None = None) -> None:
+    if location not in {"unknown", "inventory", "stash"}:
+        raise ValueError("candidate location must be unknown, inventory or stash")
+    if item_id is not None and (item_id not in state.items or len(result.items) != 1):
+        raise ValueError("--item-id requires one recognized item and an existing ID")
+    if item_id and state.items[item_id].item.name.casefold() != result.items[0].name.casefold():
+        raise ValueError("recognized name does not match --item-id")
+    observation = sha256((result.model_dump_json() + location + str(item_id)).encode()).hexdigest()
+    if observation in state.observations:
+        return
+    state.stats.update(result.stats)
+    state.follower_stats.update(result.follower_stats)
+    state.materials.update(result.materials)
+    for index, item in enumerate(result.items):
+        matches = [key for key, value in state.items.items()
+                   if value.item.model_dump(exclude={"role"}) == item.model_dump(exclude={"role"})]
+        known_slot = item.owner != "unknown" and item.slot and item.slot not in {"Finger", "Einhand", "Zweihand", "Nebenhand"}
+        key = item_id
+        if key is None and item.role == "equipped" and known_slot and len(matches) == 1:
+            key = matches[0]
+        if key is None:
+            # ponytail: no fuzzy identity matching; new screenshots can be duplicate observations.
+            key = sha256(json.dumps([result.source_images, index, item.model_dump()],
+                                   sort_keys=True, ensure_ascii=False).encode()).hexdigest()[:16]
+        previous = state.items.get(key)
+        if item.role == "equipped" and known_slot:
+            for other_key, other in state.items.items():
+                if other_key != key and other.location == "equipped" and other.item.owner == item.owner and other.item.slot == item.slot:
+                    other.location = "unknown"
+        state.items[key] = StoredItem(
+            item=item, location="equipped" if item.role == "equipped" else
+            location if location != "unknown" or previous is None else previous.location,
+            souvenir=previous.souvenir if previous else False,
+            cube_status=previous.cube_status if previous else "unknown",
+            source_images=result.source_images,
+        )
+    state.observations.append(observation)
+
+
+def persist_recognition(path: Path, result: Recognition, *, location: str = "unknown",
+                        item_id: str | None = None) -> None:
+    with state_lock(path):
+        state = load_state(path)
+        update_state(state, result, location=location, item_id=item_id)
+        save_state(path, state)
 
 
 def locate(
@@ -568,10 +730,42 @@ def main() -> None:
     )
     analyze_command.add_argument("--model", default=MODEL)
     analyze_command.add_argument("--screen-type", choices=GUIDED_PANELS)
+    analyze_command.add_argument("--state", type=Path, default=Path("data/state.json"))
+    analyze_command.add_argument("--location", choices=["unknown", "inventory", "stash"], default="unknown")
+    analyze_command.add_argument("--item-id", help="Existing item identity for a single-item screenshot")
     watch_command = commands.add_parser("watch")
     watch_command.add_argument("--queue", type=Path, default=Path("screenshots"))
     watch_command.add_argument("--results", type=Path, default=Path("data/results"))
     watch_command.add_argument("--model", default=MODEL)
+    watch_command.add_argument("--state", type=Path, default=Path("data/state.json"))
+    state_command = commands.add_parser("state", help="Inspect/update the local character state")
+    state_command.add_argument("--file", type=Path, default=Path("data/state.json"))
+    actions = state_command.add_subparsers(dest="state_action", required=True)
+    actions.add_parser("show")
+    configure = actions.add_parser("configure")
+    configure.add_argument("--class", dest="character_class")
+    configure.add_argument("--build")
+    configure.add_argument("--season")
+    configure.add_argument("--goal", action="append", help="Ordered goals; replaces the goal list")
+    progress = actions.add_parser("progress")
+    progress.add_argument("area", choices=["season_journey", "altar"])
+    progress.add_argument("key")
+    progress.add_argument("status", choices=["unknown", "todo", "done"])
+    resource = actions.add_parser("resource")
+    resource.add_argument("name", choices=["gold", "blood_shards"])
+    resource.add_argument("amount", type=int)
+    mark = actions.add_parser("item")
+    mark.add_argument("id")
+    mark.add_argument("--location", choices=["unknown", "inventory", "stash"])
+    mark.add_argument("--souvenir", action="store_true")
+    mark.add_argument("--cube-status", choices=["unknown", "needed", "not_needed"])
+    equip = actions.add_parser("equip", help="Issue an equip recommendation and assume it is followed")
+    equip.add_argument("id")
+    equip.add_argument("--replace-id")
+    ingest = actions.add_parser("ingest", help="Import saved recognition JSON without another GPU call")
+    ingest.add_argument("result", type=Path)
+    ingest.add_argument("--location", choices=["unknown", "inventory", "stash"], default="unknown")
+    ingest.add_argument("--item-id")
     args = parser.parse_args()
     if args.command == "analyze":
         if len(args.images) == 1:
@@ -587,9 +781,44 @@ def main() -> None:
             result = analyze_many(
                 args.images, model=args.model, screen_type=args.screen_type
             )
+        persist_recognition(args.state, result, location=args.location, item_id=args.item_id)
         print(result.model_dump_json(indent=2))
+    elif args.command == "watch":
+        watch(args.queue, args.results, model=args.model, state_path=args.state)
     else:
-        watch(args.queue, args.results, model=args.model)
+        with state_lock(args.file):
+            state = load_state(args.file)
+            if args.state_action == "configure":
+                for field in ("character_class", "build", "season"):
+                    if getattr(args, field) is not None:
+                        setattr(state, field, getattr(args, field))
+                if args.goal is not None:
+                    state.goals = args.goal
+            elif args.state_action == "progress":
+                getattr(state, args.area)[args.key] = args.status
+            elif args.state_action == "resource":
+                if args.amount < 0:
+                    parser.error("resource amount cannot be negative")
+                state.resources[args.name] = args.amount
+            elif args.state_action == "item":
+                stored = state.items[args.id]
+                if args.location:
+                    stored.location = args.location
+                if args.souvenir:
+                    stored.souvenir = True
+                if args.cube_status:
+                    stored.cube_status = args.cube_status
+            elif args.state_action == "equip":
+                advice = recommend_equip(state, args.id, replace_id=args.replace_id)
+                save_state(args.file, state)
+                print(advice.model_dump_json(indent=2))
+                return
+            elif args.state_action == "ingest":
+                update_state(state, Recognition.model_validate_json(args.result.read_text(encoding="utf-8")),
+                             location=args.location, item_id=args.item_id)
+            if args.state_action != "show":
+                save_state(args.file, state)
+            print(state.model_dump_json(indent=2))
 
 
 def crop_panel(
@@ -619,7 +848,8 @@ def claim_next(incoming: Path, processing: Path) -> Path | None:
     return images[0].replace(processing / images[0].name) if images else None
 
 
-def process_next(queue: Path, results: Path, *, model: str = MODEL) -> bool:
+def process_next(queue: Path, results: Path, *, model: str = MODEL,
+                 state_path: Path | None = None) -> bool:
     processing = queue / "processing"
     done = queue / "done"
     failed = queue / "failed"
@@ -635,6 +865,7 @@ def process_next(queue: Path, results: Path, *, model: str = MODEL) -> bool:
         temporary = target.with_suffix(".json.tmp")
         temporary.write_text(recognition.model_dump_json(indent=2), encoding="utf-8")
         temporary.replace(target)
+        persist_recognition(state_path or results.parent / "state.json", recognition)
         claimed.replace(done / claimed.name)
     except Exception as error:
         claimed.replace(failed / claimed.name)
@@ -648,9 +879,10 @@ def watch(
     *,
     model: str = MODEL,
     poll_seconds: float = 1,
+    state_path: Path | None = None,
 ) -> None:
     while True:
-        if not process_next(queue, results, model=model):
+        if not process_next(queue, results, model=model, state_path=state_path):
             sleep(poll_seconds)
 
 

@@ -2,8 +2,9 @@
 
 Lokaler, screenshotbasierter Assistent für Diablo III. Der aktuelle Proof of
 Concept erkennt Items sowie sichtbare Spielerwerte, Begleiterwerte und
-Materialien in deutschen Screenshots und schreibt sie als validiertes JSON.
-Er automatisiert weder das Spiel noch strategische Entscheidungen.
+Materialien in deutschen Screenshots und aktualisiert einen lokalen JSON-Status.
+Ausrüstungs-Empfehlungen lassen sich manuell auslösen und werden als befolgt
+erfasst. Eine automatische strategische Itembewertung ist noch nicht enthalten.
 
 Die mitgelieferten Testfälle und bisherigen Screenshots sind nur Testdaten. Das
 Projekt ist nicht an einen Build gebunden; insbesondere ist der frühere
@@ -54,9 +55,10 @@ Vollbild -> Layout-JSON -> Item-Crops -> Item-JSON -> Normalisierung -> Ergebnis
 Das ist der aktuelle Harness: feste Schemas, reproduzierbare Testdaten, eine
 serielle Queue und deterministische Nachbearbeitung um ein probabilistisches
 Vision-Modell. Die automatische Lokalisierung schmaler Details- und
-Materialfenster ist noch unzuverlässig; der mittige Fallback deckt zudem keine
-Tooltips am äußersten Bildrand ab. Eine hohe Modell-`confidence` ist kein Beleg
-für vollständige Erkennung. Strategieregeln, Charakter-State, Screenshot-Aufnahme und
+Materialfenster ist noch unzuverlässig. Auch der zusätzliche Halbbild-Fallback
+garantiert keine Erkennung: Beim Sunwuko-Testitem fand Qwen den Tooltip links,
+rechts jedoch weiterhin kein Panel. Eine hohe Modell-`confidence` ist kein Beleg
+für vollständige Erkennung. Strategieregeln, Screenshot-Aufnahme und
 Handy-Benachrichtigungen gehören noch nicht zum PoC. Würfel-Fertigkeiten,
 Altar, Skillung und Rift-Ergebnisse sind spätere Ansichten. Auch die gefüllte
 oder leere Raute eines legendären Effekts (bereits extrahiert/nicht extrahierbar
@@ -122,6 +124,94 @@ Oder die serielle Queue starten und PNG-/JPG-Dateien nach
 ```powershell
 uv run python d3coach.py watch
 ```
+
+## Lokaler Status
+
+`analyze` und `watch` aktualisieren standardmäßig `data/state.json` nach einer
+erfolgreichen Erkennung; `--state <pfad>` wählt eine andere Datei. Die Datei ist
+Git-ignoriert. Sie enthält Charakterklasse, Build, Saison, geordnete Ziele,
+Saisonreise-/Altarfortschritt, Spieler-/Begleiterwerte, Materialien, Ressourcen
+und Items mit ID, Ort, Quelldateien, Andenkenschutz und Würfelstatus.
+Standardprofil: Kreuzritter, Aegis der Tapferkeit; die Saison wird nicht erraten.
+
+```powershell
+uv run python d3coach.py state show
+uv run python d3coach.py state configure --season "Meine Saison" --goal "Saisonreise abschließen" --goal "Altar aufrüsten"
+uv run python d3coach.py state progress season_journey "Kapitel I" done
+uv run python d3coach.py state progress altar "Mein nächster Knoten" todo
+uv run python d3coach.py state resource gold 100000
+uv run python d3coach.py state resource blood_shards 500
+```
+
+Saisonreise, Altar, Gold und Blutsplitter werden derzeit manuell gepflegt; ihre
+Screenshot-Erkennung folgt später. Unbekannter Fortschritt wird nicht als
+abgeschlossen gewertet. Sichtbare Stats/Materialien ergänzen bisherige Daten;
+fehlende Scrollzeilen löschen nichts, redundante Werte werden ersetzt, nicht
+addiert. Screenshots müssen deshalb in zeitlicher Reihenfolge eingelesen werden.
+Gleiche Ergebnisdaten mit denselben Quellen und derselben Zuordnung sind
+idempotent. Leere Erkennung löscht keine bestehende Ausrüstung.
+
+Ein Item-Tooltip allein belegt keinen vollständigen Inventar- oder Truhenbestand.
+Kandidaten bekommen zunächst `location=unknown`; ihr Ort kann beim direkten
+Aufruf angegeben werden. Ein bereits gespeichertes Ergebnis lässt sich ohne
+neuen GPU-Aufruf importieren:
+
+```powershell
+uv run python d3coach.py analyze "drop.png" --location stash
+uv run python d3coach.py state ingest "data/results/drop.json" --location inventory
+uv run python d3coach.py state item ITEM_ID --location stash --souvenir
+```
+
+Neue Kandidatenaufnahmen können dasselbe reale Item erneut erfassen. Gleiche
+Namen oder Werte beweisen keine Identität, da mehrere Kopien existieren können.
+Für ein bekanntes Item, insbesondere nach Verzaubern oder zum Korrigieren eines
+angenommenen Ausrüstungswechsels, dessen ID mitgeben. Dafür muss das Ergebnis
+genau ein Item mit passendem Namen enthalten (Vergleichsanzeige ausschalten):
+
+```powershell
+uv run python d3coach.py analyze "nach-verzaubern.png" --item-id ITEM_ID
+uv run python d3coach.py state ingest "korrigiertes-ergebnis.json" --item-id ITEM_ID
+```
+
+Beobachtete ausgerüstete Items aktualisieren eindeutige Slots desselben Besitzers.
+Spieler und Begleiter bleiben getrennt. Ringe und Waffen können mehrere Plätze
+oder Kombinationen haben und werden deshalb nicht automatisch gegeneinander
+ersetzt. Waffenwechsel zwischen verschiedenen Slottypen sind noch nicht unterstützt.
+
+```powershell
+uv run python d3coach.py state equip NEUE_ITEM_ID
+uv run python d3coach.py state equip NEUE_RING_ID --replace-id ALTER_RING_ID
+```
+
+`state equip` ist eine vom Benutzer ausgewählte Empfehlung, kein automatisch
+berechnetes Upgrade. Sie gibt auch die Folgeaktion für das ersetzte Item aus
+und speichert die neue Ausrüstung sofort mit `evidence=assumed`. Das alte Item
+wird zunächst im Inventar angenommen: Eine Empfehlung zum Zerlegen oder
+Extrahieren behauptet nicht, dass diese Aktion bereits ausgeführt wurde.
+Ein neuer Screenshot kann die Annahme korrigieren (`evidence=observed`);
+ein dabei verdrängtes Item bekommt den Ort `unknown`, nicht einen erfundenen
+Truhenplatz. Angezeigte Itemrollen bleiben die letzte Beobachtung; `location`
+beschreibt den aktuellen gespeicherten Ort.
+
+Archaische Items sind automatisch dauerhaft als Andenken geschützt. Auch
+andere Items lassen sich mit `--souvenir` schützen. Für ersetzte Items gilt:
+Andenken behalten; bei benötigter Würfelmacht zur Extraktion aufheben; bei
+unbekanntem Würfelstatus behalten und prüfen. Nur nach expliziter Prüfung
+(`not_needed`) kommt eine Zerlege-Empfehlung infrage. Andere strategische
+Aufbewahrungsgründe müssen bis zur Regelengine als Andenken markiert werden.
+
+```powershell
+uv run python d3coach.py state item ITEM_ID --cube-status needed
+uv run python d3coach.py state item ITEM_ID --cube-status not_needed
+```
+
+Die Raute wird noch nicht automatisch gelesen; der Würfelstatus bleibt daher
+zunächst unbekannt. Die Speicherung nutzt atomaren Dateiersatz und eine
+Schreibsperre gegen parallele Statusbefehle. Ungültiges Status-JSON wird nicht
+zurückgesetzt. Nach einem Prozessabbruch kann eine `.json.lock` zurückbleiben;
+diese erst entfernen, wenn kein Status-Schreiber mehr läuft. Scheitert im
+Watcher nur das Statusupdate, bleiben Ergebnis-JSON und Screenshot erhalten
+(Screenshot in `failed/`), damit sich das Ergebnis später erneut importieren lässt.
 
 Alternative Modelle können beide Befehle mit `--model <ollama-name>` erhalten.
 Die Verarbeitung bleibt vollständig lokal; der Code sendet Bilder nur an die
