@@ -51,11 +51,11 @@ class QueueTest(unittest.TestCase):
     @patch("d3coach.analyze")
     def test_processes_one_screenshot_and_saves_json(self, analyze_mock):
         analyze_mock.return_value = Recognition(
-            screen_type="other",
+            screen_type="materials",
             panels=[],
             items=[],
             stats={},
-            materials={},
+            materials={"Staub": 1},
             confidence=1.0,
         )
         with tempfile.TemporaryDirectory() as root:
@@ -72,7 +72,7 @@ class QueueTest(unittest.TestCase):
                 json.loads((results / "001.json").read_text(encoding="utf-8"))[
                     "screen_type"
                 ],
-                "other",
+                "materials",
             )
 
     @patch("d3coach.analyze", side_effect=RuntimeError("model failed"))

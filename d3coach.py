@@ -18,6 +18,7 @@ OLLAMA_URL = "http://localhost:11434/api/chat"
 OLLAMA_GENERATE_URL = "http://localhost:11434/api/generate"
 MODEL = "qwen3-vl:8b-instruct"
 NonNegativeInt = Annotated[int, Field(ge=0)]
+HeaderTitle = Literal["", "TEMPLER", "VERZAUBERIN", "SCHUFT", "BEUTETRUHE", "DETAILS", "MATERIALIEN", "INVENTAR"]
 # ponytail: calibrated to 2560x1440; replace when layout detection handles small panels.
 GUIDED_PANELS = {
     "player_stats": ("player_stats", "player", "unknown", [515, 0, 730, 835]),
@@ -78,10 +79,47 @@ Lass Abschnittsüberschriften und abgeschnittene Zeilen weg. Erfinde nichts."""
 MATERIALS_PROMPT = """Lies nur die sichtbaren Materialien im MATERIALIEN-Fenster.
 Gib jeden Materialnamen und seine Anzahl als ganze Zahl ohne Tausenderpunkte aus.
 Lass Abschnittsüberschriften und abgeschnittene Zeilen weg. Erfinde nichts."""
+VIEW_PROMPT = """Lies nur den Fenstertitel in diesem Ausschnitt.
+Erlaubte Titel sind TEMPLER, VERZAUBERIN, SCHUFT, BEUTETRUHE, DETAILS,
+MATERIALIEN, INVENTAR. Bei keinem sichtbaren Titel leere Zeichenkette.
+Keine Interpretation, nur sichtbare Buchstaben. Ignoriere Itemnamen und Symbole."""
 
 
 class StrictModel(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
+
+
+class ViewContext(StrictModel):
+    screen_type: Literal["items_or_other", "player_stats", "materials", "follower_stats"] = "items_or_other"
+    follower_open: bool = False
+    stash_open: bool = False
+    inventory_open: bool = False
+
+
+class ViewTitles(StrictModel):
+    left_title: HeaderTitle
+    middle_left_title: HeaderTitle
+    middle_right_title: HeaderTitle
+    right_title: HeaderTitle
+
+    def context(self) -> ViewContext:
+        left, middle_left, middle_right, right = (
+            value.strip().upper() for value in
+            (self.left_title, self.middle_left_title, self.middle_right_title, self.right_title))
+        follower = left in {"TEMPLER", "VERZAUBERIN", "SCHUFT"}
+        screen_type = "items_or_other"
+        if middle_right == "MATERIALIEN":
+            screen_type = "materials"
+        elif follower and middle_left == "DETAILS":
+            screen_type = "follower_stats"
+        elif middle_right == "DETAILS":
+            screen_type = "player_stats"
+        return ViewContext(screen_type=screen_type, follower_open=follower,
+                           stash_open=left == "BEUTETRUHE", inventory_open=right == "INVENTAR")
+
+
+class ViewTitle(StrictModel):
+    title: HeaderTitle
 
 
 class Panel(StrictModel):
@@ -104,6 +142,7 @@ class Panel(StrictModel):
 class Item(StrictModel):
     role: Literal["candidate", "equipped", "unknown"]
     owner: Literal["player", "follower", "unknown"]
+    observed_location: Literal["unknown", "inventory", "stash"] = "unknown"
     name: str
     kind: Literal["equipment", "gem"] = "equipment"
     quality: Literal[
@@ -323,9 +362,12 @@ def update_state(state: CoachState, result: Recognition, *, location: str = "unk
                  item_id: str | None = None) -> None:
     if location not in {"unknown", "inventory", "stash"}:
         raise ValueError("candidate location must be unknown, inventory or stash")
-    if item_id is not None and (item_id not in state.items or len(result.items) != 1):
-        raise ValueError("--item-id requires one recognized item and an existing ID")
-    if item_id and state.items[item_id].item.name.casefold() != result.items[0].name.casefold():
+    selected = [index for index, item in enumerate(result.items) if item.role == "candidate"]
+    if len(result.items) == 1:
+        selected = [0]
+    if item_id is not None and (item_id not in state.items or len(selected) != 1):
+        raise ValueError("--item-id requires one candidate (or one single item) and an existing ID")
+    if item_id and state.items[item_id].item.name.casefold() != result.items[selected[0]].name.casefold():
         raise ValueError("recognized name does not match --item-id")
     observation = sha256((result.model_dump_json() + location + str(item_id)).encode()).hexdigest()
     if observation in state.observations:
@@ -335,9 +377,9 @@ def update_state(state: CoachState, result: Recognition, *, location: str = "unk
     state.materials.update(result.materials)
     for index, item in enumerate(result.items):
         matches = [key for key, value in state.items.items()
-                   if value.item.model_dump(exclude={"role"}) == item.model_dump(exclude={"role"})]
+                   if value.item.model_dump(exclude={"role", "observed_location"}) == item.model_dump(exclude={"role", "observed_location"})]
         known_slot = item.owner != "unknown" and item.slot and item.slot not in {"Finger", "Einhand", "Zweihand", "Nebenhand"}
-        key = item_id
+        key = item_id if item_id and index == selected[0] else None
         if key is None and item.role == "equipped" and known_slot and len(matches) == 1:
             key = matches[0]
         if key is None:
@@ -351,7 +393,8 @@ def update_state(state: CoachState, result: Recognition, *, location: str = "unk
                     other.location = "unknown"
         state.items[key] = StoredItem(
             item=item, location="equipped" if item.role == "equipped" else
-            location if location != "unknown" or previous is None else previous.location,
+            location if location != "unknown" else item.observed_location
+            if item.observed_location != "unknown" or previous is None else previous.location,
             souvenir=previous.souvenir if previous else False,
             cube_status=previous.cube_status if previous else "unknown",
             source_images=result.source_images,
@@ -615,6 +658,30 @@ def unload(*, opener=urlopen, model: str = MODEL) -> None:
         response.read()
 
 
+def classify_view(image: Path, *, model: str = MODEL) -> ViewContext:
+    with TemporaryDirectory() as root:
+        header = Path(root) / "headers.png"
+        with Image.open(image) as source:
+            if source.size != (2560, 1440):
+                return ViewContext()
+            # ponytail: calibrated red window frames; extend for other resolutions/themes.
+            bands = [(0, 155, 700, 215), (650, 50, 1250, 150),
+                     (1250, 50, 1850, 150), (1850, 140, 2560, 215)]
+            frames = [(180, 15, 520, 125), (780, 15, 1180, 55),
+                      (1450, 15, 1780, 55), (2050, 15, 2380, 125)]
+            titles = {}
+            for label, box, frame in zip(ViewTitles.model_fields, bands, frames):
+                pixels = list(source.convert("RGB").crop(frame).get_flattened_data())
+                present = sum(r > 40 and r > 1.5 * g and r > 1.5 * b for r, g, b in pixels) / len(pixels) >= 0.25
+                titles[label] = ""
+                if present:
+                    source.crop(box).save(header)
+                    titles[label] = ViewTitle.model_validate_json(_ask(
+                        header, prompt=VIEW_PROMPT, schema=ViewTitle.model_json_schema(),
+                        num_predict=64, opener=urlopen, model=model, keep_alive="5m")).title
+        return ViewTitles(**titles).context()
+
+
 def analyze(
     image: Path,
     *,
@@ -629,6 +696,9 @@ def analyze(
             if source.size != (2560, 1440):
                 raise ValueError("guided screen types require a 2560x1440 screenshot")
     try:
+        context = classify_view(image, model=model) if screen_type is None else ViewContext()
+        if screen_type is None and context.screen_type != "items_or_other":
+            screen_type = context.screen_type
         if screen_type is None:
             layout = locate_with_fallback(image, model=model, keep_alive="5m")
         else:
@@ -660,15 +730,18 @@ def analyze(
                     Path(root) / f"panel-{index}.png",
                 )
                 if panel.kind == "item":
-                    items.append(
-                        extract_item(
+                    item = extract_item(
                             crop,
                             role=panel.role,
-                            owner=panel.owner,
+                            owner="follower" if context.follower_open else panel.owner,
                             model=model,
                             keep_alive="5m",
                         )
-                    )
+                    if panel.role == "candidate" and context.inventory_open:
+                        # ponytail: observed stash-left/inventory-right tooltip geometry.
+                        location = "stash" if context.stash_open and sum(panel.box_1000[::2]) < 1000 else "inventory"
+                        item.observed_location = location
+                    items.append(item)
                 elif panel.kind == "materials":
                     materials.update(
                         extract_materials(crop, model=model, keep_alive="5m")
@@ -853,7 +926,26 @@ def process_next(queue: Path, results: Path, *, model: str = MODEL,
     processing = queue / "processing"
     done = queue / "done"
     failed = queue / "failed"
-    claimed = claim_next(queue / "incoming", processing)
+    review = queue / "review"
+    incoming = queue / "incoming"
+    incoming.mkdir(parents=True, exist_ok=True)
+    processing.mkdir(parents=True, exist_ok=True)
+    pending = sorted(path for path in processing.iterdir() if path.suffix.lower() in IMAGE_SUFFIXES)
+    images = pending or sorted(path for path in incoming.iterdir() if path.suffix.lower() in IMAGE_SUFFIXES)
+    if not images:
+        return False
+    try:
+        before = images[0].stat()
+        sleep(0.5)
+        after = images[0].stat()
+    except FileNotFoundError:
+        return False
+    if (before.st_size, before.st_mtime_ns) != (after.st_size, after.st_mtime_ns):
+        return False
+    try:
+        claimed = pending[0] if pending else images[0].replace(processing / images[0].name)
+    except (PermissionError, FileNotFoundError):
+        return False
     if claimed is None:
         return False
     done.mkdir(parents=True, exist_ok=True)
@@ -865,11 +957,18 @@ def process_next(queue: Path, results: Path, *, model: str = MODEL,
         temporary = target.with_suffix(".json.tmp")
         temporary.write_text(recognition.model_dump_json(indent=2), encoding="utf-8")
         temporary.replace(target)
+        if not (recognition.items or recognition.stats or recognition.follower_stats or recognition.materials):
+            review.mkdir(parents=True, exist_ok=True)
+            claimed.replace(review / claimed.name)
+            print(f"PRÜFEN {claimed.name}: keine verwertbaren Daten; Ergebnis {target}", flush=True)
+            return True
         persist_recognition(state_path or results.parent / "state.json", recognition)
         claimed.replace(done / claimed.name)
+        print(f"OK {claimed.name}: {recognition.screen_type}, {len(recognition.items)} Items; Status aktualisiert", flush=True)
     except Exception as error:
         claimed.replace(failed / claimed.name)
         (failed / f"{claimed.stem}.error.txt").write_text(str(error), encoding="utf-8")
+        print(f"FEHLER {claimed.name}: {error}", flush=True)
     return True
 
 
@@ -881,9 +980,11 @@ def watch(
     poll_seconds: float = 1,
     state_path: Path | None = None,
 ) -> None:
-    while True:
-        if not process_next(queue, results, model=model, state_path=state_path):
-            sleep(poll_seconds)
+    print(f"Eingang: {(queue / 'incoming').resolve()}\nStatus: {(state_path or results.parent / 'state.json').resolve()}\nSerielle Verarbeitung; Strg+C beendet den Watcher.", flush=True)
+    with state_lock(queue / "watcher", timeout=0):
+        while True:
+            if not process_next(queue, results, model=model, state_path=state_path):
+                sleep(poll_seconds)
 
 
 if __name__ == "__main__":

@@ -80,6 +80,14 @@ class StateTest(unittest.TestCase):
         self.assertEqual(state.items["a"].item.armor, 700)
         self.assertTrue(state.items["a"].souvenir)
 
+    def test_explicit_item_id_updates_candidate_even_with_equipped_reference(self):
+        state = CoachState(items={"a": StoredItem(item=item("Drop"), location="inventory")})
+        result = recognition([item("Referenz").model_copy(update={"role": "equipped"}),
+                              item("Drop").model_copy(update={"armor": 700})])
+        update_state(state, result, item_id="a")
+        self.assertEqual(state.items["a"].item.armor, 700)
+        self.assertEqual(len(state.items), 2)
+
     def test_unknown_owner_and_ambiguous_slots_do_not_replace_equipment(self):
         state = CoachState(items={"a": StoredItem(item=item(), location="equipped")})
         update_state(state, recognition([item("Unknown").model_copy(

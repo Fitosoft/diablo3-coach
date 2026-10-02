@@ -16,7 +16,11 @@ Der PoC verwendet bewusst eine kleine, nachvollziehbare Pipeline:
 
 1. Ein Screenshot gelangt über `screenshots/incoming/` in eine dateibasierte
    Queue.
-2. Qwen3-VL lokal in Ollama bestimmt im automatischen Modus zunächst
+2. Bei 2560 × 1440 werden zunächst die roten Fensterrahmen an bekannten Stellen
+   geprüft. Qwen liest nur die Titel kleiner Ausschnitte. Der Code unterscheidet
+   anhand dieser Titel Spieler-/Begleiter-Details und Materialien und verwendet
+   dafür die getesteten festen Listen-Ausschnitte. Begleiterporträts zählen nicht
+   als geöffnete Begleiteransicht. Sonst bestimmt Qwen3-VL lokal in Ollama
    Bildschirmtyp, Panel-Rollen und normierte Koordinaten (`0..1000`). Falls
    das Vollbild gar kein Panel ergibt, versucht der PoC einmalig einen
    mittigen Bildausschnitt und rechnet dessen Koordinaten aufs Vollbild zurück.
@@ -55,7 +59,9 @@ Vollbild -> Layout-JSON -> Item-Crops -> Item-JSON -> Normalisierung -> Ergebnis
 Das ist der aktuelle Harness: feste Schemas, reproduzierbare Testdaten, eine
 serielle Queue und deterministische Nachbearbeitung um ein probabilistisches
 Vision-Modell. Die automatische Lokalisierung schmaler Details- und
-Materialfenster ist noch unzuverlässig. Auch der zusätzliche Halbbild-Fallback
+Materialfenster wird deshalb über die Titel zu festen Ausschnitten geleitet;
+das ist auf die getestete Auflösung und Fensterpositionen begrenzt.
+Auch der zusätzliche Halbbild-Fallback
 garantiert keine Erkennung: Beim Sunwuko-Testitem fand Qwen den Tooltip links,
 rechts jedoch weiterhin kein Panel. Eine hohe Modell-`confidence` ist kein Beleg
 für vollständige Erkennung. Strategieregeln, Screenshot-Aufnahme und
@@ -89,6 +95,47 @@ die globale Python-Installation unangetastet und parallele Projekte verwenden
 ihre eigenen Versionen.
 
 ## Verwendung
+
+### Screenshots automatisch verarbeiten (Windows)
+
+`start-coach.cmd` im Projektverzeichnis doppelklicken. Der Starter verwendet
+die bestehende `.venv`, benötigt keine Administratorrechte und zeigt den
+festen Eingangsordner an: `<Projektverzeichnis>\screenshots\incoming\`.
+In Greenshot diesen Ordner als Speicherziel für PNG-Screenshots einstellen
+und eindeutige Namen mit Datum/Uhrzeit verwenden. Den Starter während des
+Spielens geöffnet lassen; `Strg+C` beendet die Verarbeitung.
+
+Jeder Screenshot wird automatisch zugeordnet und seriell verarbeitet.
+Spieler-Details, Materialien und Begleiter-Details benötigen bei der getesteten
+Auflösung von 2560 × 1440 kein `--screen-type`. Ein eingeblendetes
+ausgerüstetes Vergleichsitem darf sichtbar bleiben: Beide Tooltips werden
+getrennt verarbeitet. Zum Erfassen der Ausrüstung direkt über den getragenen
+Gegenstand fahren; zum Erfassen eines Drops über das Inventar-/Truhenitem.
+Bei erkannter Truhe und Inventar wird ein Kandidat anhand seiner Tooltipposition
+links/rechts als Truhen-/Inventaritem zugeordnet; ohne eindeutigen Kontext bleibt
+der Ort unbekannt. Dafür gelten die bisher getesteten Tooltippositionen.
+
+Neue Screenshots dürfen jederzeit eintreffen, auch während einer Analyse.
+Der Watcher wartet kurz auf unveränderte Dateigröße/Änderungszeit. Das Fenster
+zeigt `OK`, `PRÜFEN` oder `FEHLER` an. Unter `screenshots/` landen Bilder in:
+
+- `done/`: verwertbare Erkennung, Status aktualisiert;
+- `review/`: keine verwertbaren Daten, Status unverändert, Ergebnis-JSON erhalten;
+- `failed/`: Fehler, Bild und Fehlermeldung erhalten;
+- `processing/`: laufende Arbeit; nach einem Abbruch beim nächsten Start fortgesetzt.
+
+Ergebnisse stehen in `data/results/`, der Status in `data/state.json`.
+Zwei Scroll-Screenshots werden nacheinander eingelesen und ergänzen dieselben
+Listen. Eine Sperrdatei verhindert einen zweiten Watcher derselben Queue. Nach
+einem harten Prozessabbruch gegebenenfalls `screenshots/watcher.lock` entfernen,
+aber erst nachdem der alte Watcher sicher beendet ist.
+
+Ein Live-Test mit fünf lokalen Beispielen erkannte automatisch Spieler-Stats,
+Materialien, Begleiter-Stats, ein Begleiter-Item und einen Itemvergleich und
+aktualisierte einen getrennten Teststatus. Die Bilder sind nicht versioniert.
+Die Textauslesung kann weiterhin Fehler enthalten; die Ordnerverarbeitung ist
+noch keine Garantie korrekter Itembewertungen. Würfel, Altar und Rift-Ergebnisse
+werden weiterhin nicht speziell ausgewertet.
 
 Einen vorhandenen Screenshot direkt analysieren:
 
@@ -152,8 +199,9 @@ Gleiche Ergebnisdaten mit denselben Quellen und derselben Zuordnung sind
 idempotent. Leere Erkennung löscht keine bestehende Ausrüstung.
 
 Ein Item-Tooltip allein belegt keinen vollständigen Inventar- oder Truhenbestand.
-Kandidaten bekommen zunächst `location=unknown`; ihr Ort kann beim direkten
-Aufruf angegeben werden. Ein bereits gespeichertes Ergebnis lässt sich ohne
+Kandidaten bekommen bei erkanntem Kontext einen beobachteten Ort, sonst
+`location=unknown`; ihr Ort kann beim direkten Aufruf angegeben werden.
+Ein bereits gespeichertes Ergebnis lässt sich ohne
 neuen GPU-Aufruf importieren:
 
 ```powershell
@@ -166,7 +214,8 @@ Neue Kandidatenaufnahmen können dasselbe reale Item erneut erfassen. Gleiche
 Namen oder Werte beweisen keine Identität, da mehrere Kopien existieren können.
 Für ein bekanntes Item, insbesondere nach Verzaubern oder zum Korrigieren eines
 angenommenen Ausrüstungswechsels, dessen ID mitgeben. Dafür muss das Ergebnis
-genau ein Item mit passendem Namen enthalten (Vergleichsanzeige ausschalten):
+genau einen Kandidaten mit passendem Namen oder ein einzelnes Item enthalten.
+Ein ausgerüstetes Referenzitem darf daneben sichtbar sein:
 
 ```powershell
 uv run python d3coach.py analyze "nach-verzaubern.png" --item-id ITEM_ID
