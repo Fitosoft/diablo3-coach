@@ -2,7 +2,7 @@
 cd /d "%~dp0"
 set PYTHONUTF8=1
 if not exist ".venv\Scripts\python.exe" (
-  echo Projektumgebung fehlt. Bitte zuerst uv sync ausfuehren.
+    echo Project environment missing. Run uv sync --locked first.
   pause
   exit /b 1
 )

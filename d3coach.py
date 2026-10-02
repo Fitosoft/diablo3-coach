@@ -12,77 +12,22 @@ from urllib.request import Request, urlopen
 from PIL import Image
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+import game_de as game
+from game_de import (
+    HeaderTitle, ITEM_PROMPT, LAYOUT_PROMPT, MATERIALS_PROMPT, STATS_PROMPT, VIEW_PROMPT,
+)
+from screen_layout import (
+    BOX_SCALE, CROP_EDGE_MARGIN, CROP_PADDING, FALLBACK_BOX, GUIDED_PANELS,
+    HALF_BOXES, HEADER_BANDS, HEADER_FRAMES, REFERENCE_SIZE,
+    FRAME_RED_MINIMUM, FRAME_RED_DOMINANCE, FRAME_RED_FRACTION,
+)
+
 
 IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png"}
 OLLAMA_URL = "http://localhost:11434/api/chat"
 OLLAMA_GENERATE_URL = "http://localhost:11434/api/generate"
 MODEL = "qwen3-vl:8b-instruct"
 NonNegativeInt = Annotated[int, Field(ge=0)]
-HeaderTitle = Literal["", "TEMPLER", "VERZAUBERIN", "SCHUFT", "BEUTETRUHE", "DETAILS", "MATERIALIEN", "INVENTAR"]
-# ponytail: calibrated to 2560x1440; replace when layout detection handles small panels.
-GUIDED_PANELS = {
-    "player_stats": ("player_stats", "player", "unknown", [515, 0, 730, 835]),
-    "materials": ("materials", "unknown", "unknown", [515, 0, 735, 845]),
-    "follower_stats": ("follower_stats", "follower", "unknown", [270, 0, 480, 835]),
-    "follower_item": ("item", "follower", "equipped", [195, 0, 425, 650]),
-}
-# ponytail: calibrated crops; full-screen detection remains first for centered views.
-FALLBACK_BOX = [156, 0, 820, 1000]
-HALF_BOXES = [[0, 0, 516, 1000], [484, 0, 1000, 1000]]
-LAYOUT_PROMPT = """Analysiere das Layout dieses deutschen Diablo-III-Screenshots.
-Lokalisiere nur schwarz umrandete Tooltip- oder Listenfenster mit lesbarem Text.
-Ein Item-Panel enthält einen Itemnamen, Ausrüstungswerte und Affixe. Die Ansicht
-INVENTAR allein ist KEIN Item-Panel. Erfinde keine Items aus Ausrüstungssymbolen.
-DETAILS mit OFFENSIV/DEFENSIV ist player_stats, außer die Begleiteransicht TEMPLER
-ist geöffnet: Dann ist es follower_stats mit owner=follower.
-MATERIALIEN mit HANDWERK ist materials. Erfasse jeweils das gesamte sichtbare
-Listenfenster, nicht das Inventar daneben.
-Ein Item-Panel mit der Überschrift AUSGERÜSTET hat role=equipped. Ein daneben
-angezeigtes Vergleichsitem hat role=candidate. In der TEMPLER-Ansicht ist
-owner=follower, sonst owner=player.
-Koordinaten in box_1000 sind ganze Zahlen von 0 bis 1000 relativ zum Vollbild.
-Nutze other und leere panels, wenn keines der Fenster sicher sichtbar ist.
-Erfinde weder Panels noch Koordinaten."""
-ITEM_PROMPT = """Extrahiere exakt das einzelne sichtbare deutsche Diablo-III-Item.
-role={role} und owner={owner} sind vorgegeben.
-name ist die große Überschrift ganz oben im Tooltip, unabhängig von ihrer
-Farbe (gold, grün, gelb, blau). Beispiel: PFEILMACHERGRIMM, nicht Seltener Köcher.
-quality_text ist die farbige Typenzeile neben dem Item-Icon, zum Beispiel
-"Seltener Köcher" oder "Uraltes Set: Brustschutz". "Nebenhand" und
-"Dämonenjäger" sind keine quality_text-Werte. slot ist der Ausrüstungsplatz
-rechts oben, nicht die Charakterklasse.
-Übernimm sichtbare Zahlen, Wertebereiche und Affix-Texte exakt.
-armor ist nur der große weiße Wert mit dem Label "Rüstung"; dps ist nur der
-große weiße Wert mit dem Label "Schaden pro Sekunde". Dornenschaden ist kein dps.
-socket_effects enthält jede Zeile mit eingesetztem Edelstein-Effekt separat
-(auch identische Zeilen mehrfach) sowie "Leerer Sockel" für leere Sockel.
-Diese Zeilen gehören nicht in primary_affixes oder secondary_affixes.
-Bei einem eigenständigen Edelstein ist quality_text="Edelstein"; seine
-Wirkungen bleiben in primary_affixes, socket_effects ist leer.
-Ein eingesetzter legendärer Edelstein (Name, "Stufe" und Wirkungen) gehört
-vollständig zu socket_effects, auch wenn seine Wirkung orange geschrieben ist.
-legendary_power bezeichnet nur die Macht des Ausrüstungsgegenstands selbst.
-set_name ist nur die grüne Set-Überschrift über der Set-Teileliste;
-bei einem legendären Nicht-Set-Item muss set_name null sein.
-legendary_power ist nur ein orangefarbener itemspezifischer Effekt mit
-Rautenmarker. Goldener kursiver Flavor-Text ist kein Effekt und gehört weder
-in set_name noch in legendary_power. Grüne Setlisten und Set-Boni gehören
-ebenfalls nicht hinein.
-Ein weißer Edelsteinwert wie "+280 Geschicklichkeit" und kosmetischer Text wie
-"Verschwindendes Färbemittel" sind niemals legendary_power.
-Auch der Edelsteinwert "Kritischer Trefferschaden um 130,0% erhöht" gehört
-zu socket_effects, nicht zu legendary_power.
-Ignoriere Werteveränderungen beim Anlegen, Set-Bonus-Texte, Flavor-Text, Verkaufswert und Haltbarkeit. Erfinde nichts."""
-STATS_PROMPT = """Lies nur die sichtbaren Werte im DETAILS-Fenster für owner={owner}.
-Gib jedes sichtbare Wertepaar als deutschen Anzeigenamen und exakten Wert-Text aus.
-Lass Abschnittsüberschriften und abgeschnittene Zeilen weg. Erfinde nichts."""
-MATERIALS_PROMPT = """Lies nur die sichtbaren Materialien im MATERIALIEN-Fenster.
-Gib jeden Materialnamen und seine Anzahl als ganze Zahl ohne Tausenderpunkte aus.
-Lass Abschnittsüberschriften und abgeschnittene Zeilen weg. Erfinde nichts."""
-VIEW_PROMPT = """Lies nur den Fenstertitel in diesem Ausschnitt.
-Erlaubte Titel sind TEMPLER, VERZAUBERIN, SCHUFT, BEUTETRUHE, DETAILS,
-MATERIALIEN, INVENTAR. Bei keinem sichtbaren Titel leere Zeichenkette.
-Keine Interpretation, nur sichtbare Buchstaben. Ignoriere Itemnamen und Symbole."""
 
 
 class StrictModel(BaseModel):
@@ -106,16 +51,16 @@ class ViewTitles(StrictModel):
         left, middle_left, middle_right, right = (
             value.strip().upper() for value in
             (self.left_title, self.middle_left_title, self.middle_right_title, self.right_title))
-        follower = left in {"TEMPLER", "VERZAUBERIN", "SCHUFT"}
+        follower = left in game.FOLLOWER_TITLES
         screen_type = "items_or_other"
-        if middle_right == "MATERIALIEN":
+        if middle_right == game.MATERIALS_TITLE:
             screen_type = "materials"
-        elif follower and middle_left == "DETAILS":
+        elif follower and middle_left == game.DETAILS_TITLE:
             screen_type = "follower_stats"
-        elif middle_right == "DETAILS":
+        elif middle_right == game.DETAILS_TITLE:
             screen_type = "player_stats"
         return ViewContext(screen_type=screen_type, follower_open=follower,
-                           stash_open=left == "BEUTETRUHE", inventory_open=right == "INVENTAR")
+                           stash_open=left == game.STASH_TITLE, inventory_open=right == game.INVENTORY_TITLE)
 
 
 class ViewTitle(StrictModel):
@@ -132,7 +77,7 @@ class Panel(StrictModel):
     @field_validator("box_1000")
     @classmethod
     def validate_box(cls, box: list[int]) -> list[int]:
-        if any(coordinate < 0 or coordinate > 1000 for coordinate in box):
+        if any(coordinate < 0 or coordinate > BOX_SCALE for coordinate in box):
             raise ValueError("box coordinates must be between 0 and 1000")
         if box[0] >= box[2] or box[1] >= box[3]:
             raise ValueError("box must have positive width and height")
@@ -271,10 +216,10 @@ class EquipmentAdvice(StrictModel):
 
 class CoachState(StrictModel):
     schema_version: Literal[1] = 1
-    character_class: str = "Kreuzritter"
-    build: str = "Aegis der Tapferkeit"
+    character_class: str = "Crusader"
+    build: str = "Aegis of Valor"
     season: str | None = None
-    goals: list[str] = Field(default_factory=lambda: ["Saisonreise abschließen", "Altar aufrüsten"])
+    goals: list[str] = Field(default_factory=lambda: ["Complete the Season Journey", "Upgrade the Altar"])
     season_journey: dict[str, Literal["unknown", "todo", "done"]] = Field(default_factory=dict)
     altar: dict[str, Literal["unknown", "todo", "done"]] = Field(default_factory=dict)
     stats: dict[str, str] = Field(default_factory=dict)
@@ -319,12 +264,12 @@ def state_lock(path: Path, *, timeout: float = 5):
 
 def disposal_advice(stored: StoredItem) -> tuple[str, str]:
     if stored.souvenir or stored.item.quality == "primal":
-        return "keep", "Andenken/archaisches Item: aufheben."
+        return "keep", "Souvenir/primal item: keep."
     if stored.cube_status == "needed":
-        return "cube", "Für die noch benötigte Würfelmacht aufheben und extrahieren."
+        return "cube", "Keep and extract the still-needed cube power."
     if stored.cube_status == "unknown":
-        return "keep", "Würfelstatus unbekannt: vor dem Zerlegen prüfen."
-    return "salvage", "Würfelprüfung abgeschlossen; kein Andenken."
+        return "keep", "Cube status unknown: check before salvaging."
+    return "salvage", "Cube check completed; not a souvenir."
 
 
 def recommend_equip(state: CoachState, item_id: str, *, replace_id: str | None = None) -> EquipmentAdvice:
@@ -333,7 +278,7 @@ def recommend_equip(state: CoachState, item_id: str, *, replace_id: str | None =
     if item.kind != "equipment" or item.owner == "unknown" or not item.slot:
         raise ValueError("equipping requires equipment with a known owner and slot")
     # ponytail: rings and weapon combinations need explicit replacement, not a guessed slot.
-    ambiguous = item.slot in {"Finger", "Einhand", "Zweihand", "Nebenhand"}
+    ambiguous = item.slot in game.AMBIGUOUS_SLOTS
     if ambiguous and replace_id is None:
         raise ValueError("rings/weapons require --replace-id; an empty slot is not assumed")
     existing = [key for key, value in state.items.items() if key != item_id
@@ -345,7 +290,7 @@ def recommend_equip(state: CoachState, item_id: str, *, replace_id: str | None =
         replace_id = existing[0] if existing else None
     elif replace_id == item_id or replace_id not in existing:
         raise ValueError("replacement must be an equipped item with the same owner and slot")
-    action, reason = disposal_advice(state.items[replace_id]) if replace_id else (None, "Kein erfasstes Ersatzitem.")
+    action, reason = disposal_advice(state.items[replace_id]) if replace_id else (None, "No recorded item to replace.")
     advice = EquipmentAdvice(item_id=item_id, replaced_item_id=replace_id,
                              replaced_action=action, reason=reason)
     if replace_id:
@@ -378,7 +323,7 @@ def update_state(state: CoachState, result: Recognition, *, location: str = "unk
     for index, item in enumerate(result.items):
         matches = [key for key, value in state.items.items()
                    if value.item.model_dump(exclude={"role", "observed_location"}) == item.model_dump(exclude={"role", "observed_location"})]
-        known_slot = item.owner != "unknown" and item.slot and item.slot not in {"Finger", "Einhand", "Zweihand", "Nebenhand"}
+        known_slot = item.owner != "unknown" and item.slot and item.slot not in game.AMBIGUOUS_SLOTS
         key = item_id if item_id and index == selected[0] else None
         if key is None and item.role == "equipped" and known_slot and len(matches) == 1:
             key = matches[0]
@@ -444,10 +389,10 @@ def locate_with_fallback(
                 if index and (panel.kind != "item" or panel.role != "candidate"):
                     continue
                 box = panel.box_1000.copy()
-                if (region[0] > 0 and box[0] <= 5) or (region[2] < 1000 and box[2] >= 995):
+                if (region[0] > 0 and box[0] <= CROP_EDGE_MARGIN) or (region[2] < BOX_SCALE and box[2] >= BOX_SCALE - CROP_EDGE_MARGIN):
                     continue
-                box[0] = region[0] + box[0] * (region[2] - region[0]) // 1000
-                box[2] = region[0] + box[2] * (region[2] - region[0]) // 1000
+                box[0] = region[0] + box[0] * (region[2] - region[0]) // BOX_SCALE
+                box[2] = region[0] + box[2] * (region[2] - region[0]) // BOX_SCALE
                 panels.append(panel.model_copy(update={"box_1000": box}))
             if panels:
                 return Layout(screen_type="single_item" if len(panels) == 1 and
@@ -525,51 +470,51 @@ def normalize_item(
     owner: Literal["player", "follower", "unknown"],
 ) -> Item:
     quality_text = raw.quality_text.casefold()
-    is_gem = quality_text == "edelstein"
+    is_gem = quality_text == game.GEM_LABEL
     # ponytail: observed weapon slots only; add labels when a new screenshot needs one.
-    is_weapon = raw.slot is not None and raw.slot.casefold() in {"einhand", "zweihand"}
+    is_weapon = raw.slot is not None and raw.slot.casefold() in game.WEAPON_SLOTS
     name = raw.name
     set_name = raw.set_name or None
-    if set_name and name.casefold() == quality_text and "set" not in quality_text:
+    if set_name and name.casefold() == quality_text and game.SET_LABEL not in quality_text:
         name, set_name = set_name, None
-    is_set = "set" in quality_text or (not quality_text and set_name is not None)
+    is_set = game.SET_LABEL in quality_text or (not quality_text and set_name is not None)
     if not quality_text and set_name:
-        if "set" in set_name.casefold():
+        if game.SET_LABEL in set_name.casefold():
             quality_text = set_name.casefold()
             set_name = None
         else:
-            quality_text = "legendär"
-    if "archaisch" in quality_text:
+            quality_text = game.LEGENDARY_LABEL
+    if game.PRIMAL_LABEL in quality_text:
         quality = "primal"
-    elif "uralt" in quality_text:
+    elif game.ANCIENT_LABEL in quality_text:
         quality = "ancient"
-    elif "legendär" in quality_text or is_set:
+    elif game.LEGENDARY_LABEL in quality_text or is_set:
         quality = "legendary"
-    elif "selten" in quality_text:
+    elif game.RARE_LABEL in quality_text:
         quality = "rare"
-    elif "magisch" in quality_text:
+    elif game.MAGIC_LABEL in quality_text:
         quality = "magic"
-    elif "normal" in quality_text:
+    elif game.NORMAL_LABEL in quality_text:
         quality = "normal"
     else:
         quality = "unknown"
     secondary_affixes = list(raw.secondary_affixes)
     legendary_power = raw.legendary_power
     socket_effects = list(raw.socket_effects)
-    if legendary_power and " - Stufe " in legendary_power.splitlines()[0]:
+    if legendary_power and game.GEM_LEVEL_MARKER in legendary_power.splitlines()[0]:
         for line in reversed(legendary_power.splitlines()):
             if line not in socket_effects:
                 socket_effects.insert(0, line)
         legendary_power = None
-    if raw.slot in {"Finger", "Hals"} and any(
-        " - Stufe " in effect for effect in socket_effects
+    if raw.slot in game.JEWELRY_SLOTS and any(
+        game.GEM_LEVEL_MARKER in effect for effect in socket_effects
     ):
         socket_effects = [
-            effect for effect in socket_effects if effect != "Leerer Sockel"
+            effect for effect in socket_effects if effect != game.EMPTY_SOCKET
         ]
     if legendary_power and "\n" not in legendary_power and (
         legendary_power.startswith("+")
-        or legendary_power.startswith("Kritischer Trefferschaden")
+        or legendary_power.startswith(game.CRITICAL_DAMAGE_PREFIX)
     ):
         if legendary_power not in socket_effects:
             socket_effects.append(legendary_power)
@@ -587,7 +532,7 @@ def normalize_item(
         if legendary_power is None:
             # ponytail: recover this follower effect; extend only for observed misreads.
             radiating = [
-                affix for affix in secondary_affixes if "(Strahlt aus)" in affix
+                affix for affix in secondary_affixes if game.EMANATES_MARKER in affix
             ]
             if len(radiating) == 1:
                 legendary_power = radiating[0]
@@ -602,7 +547,7 @@ def normalize_item(
         is_set=is_set,
         slot=None if is_gem else raw.slot,
         armor=(
-            None if is_gem or is_weapon or raw.slot in {"Finger", "Hals"} else raw.armor
+            None if is_gem or is_weapon or raw.slot in game.JEWELRY_SLOTS else raw.armor
         ),
         dps=raw.dps if is_weapon and raw.dps != 0 else None,
         primary_affixes=raw.primary_affixes,
@@ -662,17 +607,18 @@ def classify_view(image: Path, *, model: str = MODEL) -> ViewContext:
     with TemporaryDirectory() as root:
         header = Path(root) / "headers.png"
         with Image.open(image) as source:
-            if source.size != (2560, 1440):
+            if source.size != REFERENCE_SIZE:
                 return ViewContext()
             # ponytail: calibrated red window frames; extend for other resolutions/themes.
-            bands = [(0, 155, 700, 215), (650, 50, 1250, 150),
-                     (1250, 50, 1850, 150), (1850, 140, 2560, 215)]
-            frames = [(180, 15, 520, 125), (780, 15, 1180, 55),
-                      (1450, 15, 1780, 55), (2050, 15, 2380, 125)]
             titles = {}
-            for label, box, frame in zip(ViewTitles.model_fields, bands, frames):
+            for label, box, frame in zip(ViewTitles.model_fields, HEADER_BANDS, HEADER_FRAMES):
                 pixels = list(source.convert("RGB").crop(frame).get_flattened_data())
-                present = sum(r > 40 and r > 1.5 * g and r > 1.5 * b for r, g, b in pixels) / len(pixels) >= 0.25
+                present = sum(
+                    r > FRAME_RED_MINIMUM
+                    and r > FRAME_RED_DOMINANCE * g
+                    and r > FRAME_RED_DOMINANCE * b
+                    for r, g, b in pixels
+                ) / len(pixels) >= FRAME_RED_FRACTION
                 titles[label] = ""
                 if present:
                     source.crop(box).save(header)
@@ -693,8 +639,8 @@ def analyze(
 ) -> Recognition:
     if screen_type is not None:
         with Image.open(image) as source:
-            if source.size != (2560, 1440):
-                raise ValueError("guided screen types require a 2560x1440 screenshot")
+            if source.size != REFERENCE_SIZE:
+                raise ValueError(f"guided screen types require a {REFERENCE_SIZE[0]}x{REFERENCE_SIZE[1]} screenshot")
     try:
         context = classify_view(image, model=model) if screen_type is None else ViewContext()
         if screen_type is None and context.screen_type != "items_or_other":
@@ -739,7 +685,7 @@ def analyze(
                         )
                     if panel.role == "candidate" and context.inventory_open:
                         # ponytail: observed stash-left/inventory-right tooltip geometry.
-                        location = "stash" if context.stash_open and sum(panel.box_1000[::2]) < 1000 else "inventory"
+                        location = "stash" if context.stash_open and sum(panel.box_1000[::2]) < BOX_SCALE else "inventory"
                         item.observed_location = location
                     items.append(item)
                 elif panel.kind == "materials":
@@ -899,14 +845,14 @@ def crop_panel(
     box_1000: list[int],
     target: Path,
     *,
-    padding: int = 10,
+    padding: int = CROP_PADDING,
 ) -> Path:
     with Image.open(source) as image:
         width, height = image.size
-        left = max(0, box_1000[0] - padding) * width // 1000
-        top = max(0, box_1000[1] - padding) * height // 1000
-        right = min(1000, box_1000[2] + padding) * width // 1000
-        bottom = min(1000, box_1000[3] + padding) * height // 1000
+        left = max(0, box_1000[0] - padding) * width // BOX_SCALE
+        top = max(0, box_1000[1] - padding) * height // BOX_SCALE
+        right = min(BOX_SCALE, box_1000[2] + padding) * width // BOX_SCALE
+        bottom = min(BOX_SCALE, box_1000[3] + padding) * height // BOX_SCALE
         target.parent.mkdir(parents=True, exist_ok=True)
         image.crop((left, top, right, bottom)).save(target)
     return target
@@ -960,15 +906,15 @@ def process_next(queue: Path, results: Path, *, model: str = MODEL,
         if not (recognition.items or recognition.stats or recognition.follower_stats or recognition.materials):
             review.mkdir(parents=True, exist_ok=True)
             claimed.replace(review / claimed.name)
-            print(f"PRÜFEN {claimed.name}: keine verwertbaren Daten; Ergebnis {target}", flush=True)
+            print(f"REVIEW {claimed.name}: no usable data; result {target}", flush=True)
             return True
         persist_recognition(state_path or results.parent / "state.json", recognition)
         claimed.replace(done / claimed.name)
-        print(f"OK {claimed.name}: {recognition.screen_type}, {len(recognition.items)} Items; Status aktualisiert", flush=True)
+        print(f"OK {claimed.name}: {recognition.screen_type}, {len(recognition.items)} items; state updated", flush=True)
     except Exception as error:
         claimed.replace(failed / claimed.name)
         (failed / f"{claimed.stem}.error.txt").write_text(str(error), encoding="utf-8")
-        print(f"FEHLER {claimed.name}: {error}", flush=True)
+        print(f"ERROR {claimed.name}: {error}", flush=True)
     return True
 
 
@@ -980,7 +926,7 @@ def watch(
     poll_seconds: float = 1,
     state_path: Path | None = None,
 ) -> None:
-    print(f"Eingang: {(queue / 'incoming').resolve()}\nStatus: {(state_path or results.parent / 'state.json').resolve()}\nSerielle Verarbeitung; Strg+C beendet den Watcher.", flush=True)
+    print(f"Input: {(queue / 'incoming').resolve()}\nState: {(state_path or results.parent / 'state.json').resolve()}\nSerial processing; Ctrl+C stops the watcher.", flush=True)
     with state_lock(queue / "watcher", timeout=0):
         while True:
             if not process_next(queue, results, model=model, state_path=state_path):

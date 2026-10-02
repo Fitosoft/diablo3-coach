@@ -38,7 +38,7 @@ class StateTest(unittest.TestCase):
             result = load_state(path)
         self.assertEqual(result.stats, {"Leben": "1.000", "Rüstung": "500"})
         self.assertEqual(result.materials, {"Staub": 5, "Teile": 2})
-        self.assertEqual(result.character_class, "Kreuzritter")
+        self.assertEqual(result.character_class, "Crusader")
 
     def test_replay_is_idempotent_and_candidates_are_not_guessed_as_stash(self):
         state = CoachState()
