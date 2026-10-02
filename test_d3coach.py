@@ -3,6 +3,8 @@ import runpy
 import sys
 import tempfile
 import unittest
+from contextlib import redirect_stdout
+from io import StringIO
 from pathlib import Path
 from unittest.mock import patch
 
@@ -30,6 +32,9 @@ from d3coach import (
 
 
 class QueueTest(unittest.TestCase):
+    def setUp(self):
+        self.application_print = self.enterContext(patch("d3coach.print", create=True))
+
     def test_claims_images_in_name_order_and_ignores_other_files(self):
         with tempfile.TemporaryDirectory() as root:
             incoming = Path(root) / "incoming"
@@ -90,6 +95,9 @@ class QueueTest(unittest.TestCase):
                 (queue / "failed" / "001.error.txt").read_text(encoding="utf-8"),
                 "model failed",
             )
+            self.application_print.assert_called_once_with(
+                "ERROR 001.png: model failed", flush=True
+            )
 
     @patch("d3coach.sleep")
     @patch("d3coach.process_next", side_effect=[False, KeyboardInterrupt])
@@ -101,6 +109,16 @@ class QueueTest(unittest.TestCase):
 
         self.assertEqual(process_mock.call_count, 2)
         sleep_mock.assert_called_once_with(0.5)
+
+
+class TestOutputTest(unittest.TestCase):
+    def test_expected_failure_test_does_not_leak_application_output(self):
+        output = StringIO()
+        result = unittest.TestResult()
+        with redirect_stdout(output):
+            QueueTest("test_moves_failed_screenshots_aside_and_continues").run(result)
+        self.assertTrue(result.wasSuccessful(), result.errors + result.failures)
+        self.assertEqual(output.getvalue(), "")
 
 
 class CropTest(unittest.TestCase):

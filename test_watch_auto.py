@@ -9,6 +9,9 @@ from d3coach import ViewContext, ViewTitles, analyze, process_next, Recognition,
 
 
 class AutomaticWatchTest(unittest.TestCase):
+    def setUp(self):
+        self.enterContext(patch("d3coach.print", create=True))
+
     def test_title_routing_and_no_invented_owner_from_party_portrait(self):
         titles = ViewTitles(left_title="", middle_left_title="",
                             middle_right_title="DETAILS", right_title="INVENTAR")

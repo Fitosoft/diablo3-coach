@@ -27,6 +27,9 @@ def recognition(items=(), **changes):
 
 
 class StateTest(unittest.TestCase):
+    def setUp(self):
+        self.enterContext(patch("d3coach.print", create=True))
+
     def test_roundtrip_and_partial_lists_preserve_unseen_values(self):
         state = CoachState()
         update_state(state, recognition(stats={"Leben": "1.000"}, materials={"Staub": 5}))
