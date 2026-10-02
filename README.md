@@ -23,11 +23,10 @@ window so their commands are available. Python 3.12 is required; uv can manage
 the interpreter and keeps dependencies in the project's isolated `.venv`.
 See [uv project environments](https://docs.astral.sh/uv/guides/projects/).
 
-Clone this repository using its URL from GitHub's **Code** button (replace
-`REPOSITORY_URL` below), or download and unpack its source:
+Clone this repository, or download and unpack its source:
 
 ```powershell
-git clone REPOSITORY_URL diablo3-coach
+git clone https://github.com/Fitosoft/diablo3-coach.git
 cd diablo3-coach
 uv sync --locked --python 3.12
 ollama pull qwen3-vl:8b-instruct
